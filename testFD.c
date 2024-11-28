@@ -3,7 +3,7 @@
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
  * @LastEditors  : Please set LastEditors
- * @LastEditTime : 2024-11-28 17:53:44
+ * @LastEditTime : 2024-11-28 18:39:32
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
@@ -21,9 +21,9 @@
 #include <string.h>
 #include <semaphore.h>
 
-#define IS_DEBUG    1
-#define TEST_SELF   1
-#define DEBUG_INFO  0
+#define IS_DEBUG    1   /* 测试模式标志 */
+#define TEST_SELF   0   /* 自测功能测试标志 */
+#define DEBUG_INFO  0   /* debug输出标志 */
 
 #define BUF_LEN 126-33+1+1
 #define READ_FD 0
@@ -75,24 +75,23 @@ static char* com_prefix;
  */
 int main(int argc, char **argv)
 {
-    int pipe_fd[2];
-    char test_buf[BUF_LEN] = {0};
-    char write_buf[BUF_LEN] = {0};
-    int i;
+    int pipe_fd[2];                 /* 用于与子线程通信的pipe的fd */
+    char test_buf[BUF_LEN] = {0};   /* 存放测试数据 */
+    char write_buf[BUF_LEN] = {0};  /* 用于接收子进程回报的数据 */
+    int i;                          /* 分别存放在主线程中与主线程、子线程有关的for i */
     int t_i;
-    char m_fifo_name[280] = {0};
+    char m_fifo_name[280] = {0};    /* 主线程、子线程打开的设备的名称以及fd */
     int m_fifo_fd;
     char t_fifo_name[280] = {0};
     int t_fifo_fd;
-    pthread_t thread;
-    int end = END_SIG;
-    unsigned char arg_ret;
-    char option_ret;
-    struct dirent **comlist;
-    int com_count;
-    int failed_count = 0;
-    char **test_failed_list;
-
+    pthread_t thread;               /* 子线程的句柄 */
+    int end = END_SIG;              /* 结束信号，由主线程在结束时发给子线程 */
+    unsigned char arg_ret;          /* 接收check_args()返回的结果 */
+    char option_ret;                /* 选中的选项 */
+    struct dirent **comlist;        /* 存放所有符合条件的设备文件实例 */
+    int com_count;                  /* comlist的长度 */
+    int failed_count = 0;           /* 测试未通过的设备数量 */
+    char **test_failed_list;        /* 未通过测试的设备名称列表 */
 
 #if DEBUG_INFO
     int m_temp_sem_val;
@@ -175,6 +174,7 @@ int main(int argc, char **argv)
             sprintf(m_fifo_name, "%s/%s", DEV_DIR, comlist[i]->d_name);
 
             /* 打开设备 */
+            // TODO: 由于用于模拟设备的fifo的限制，只能都以读写模式打开，实际的环境中可以测试以只写模式打开
             if (option_ret == OPTION_SELFTEST)
             {
                 m_fifo_fd = open(m_fifo_name, O_RDWR);
@@ -210,7 +210,7 @@ int main(int argc, char **argv)
 
                 /* 获取子线程需要监听的设备的文件名 */
                 sprintf(t_fifo_name, "%s/%s", DEV_DIR, comlist[t_i]->d_name);
-                /* 打开设备 */
+                /* 打开设备，理论可以以只读打开，原因详见上方TODO */
                 t_fifo_fd = open(t_fifo_name, O_RDWR);
                 if (t_fifo_fd<=0)
                 {
@@ -305,11 +305,11 @@ int main(int argc, char **argv)
         // }
     }
 
-    /* 向子线程发送结束信号，并通知 */
 #if DEBUG_INFO
     sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
     printf("%d:sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
 #endif //! DEBUG_INFO
+    /* 向子线程发送结束信号，并通知 */
     write(pipe_fd[WRITE_FD], &end, sizeof(int));
     sem_post(&sem_mw_tr);
 
@@ -343,9 +343,9 @@ int main(int argc, char **argv)
  */
 static void *thread_task(void *arg)
 {
-    int *t_pipe_fd;
-    int t_fifo_fd;
-    fd_set t_rset;
+    int *t_pipe_fd;                 /* pipe fd */
+    int t_fifo_fd;                  /* fifo(模拟设备)fd */
+    fd_set t_rset;                  /* select参数，用于监听读事件 */
     struct timeval t_wait_time;
     int err;
     char read_buf[BUF_LEN] = {0};
@@ -460,15 +460,16 @@ static void heavy_work(void)
 #endif //! IS_DEBUG==1
 
 /*** 
- * @brief   判断参数合法性，并返回options的索引
+ * @brief   判断参数合法性，并返回options的索引；强制要求前两个参数一个是选项，一个是前缀
  * @param argc [int]    参数个数
  * @param argv [char**] 参数数组
  * @return [unsigned char] 0: 参数非法 [0:3]:prefix的位置, [4:7]:option的位置
  */
 static unsigned char check_args(int argc, char **argv)
 {
-    unsigned char check_flag = 1;
+    unsigned char check_flag = 1;   /* 校验通过标志计数 */
 
+    /* 校验参数个数以及参数格式 */
     if (argc != 3 && argc != 5)
     {
         check_flag = 0;
@@ -484,7 +485,7 @@ static unsigned char check_args(int argc, char **argv)
         check_flag = 0;
         printf("no com-prefix\n");
     }
-    else if ((argv[1])[0] == '-')
+    else if ((argv[1])[0] == '-')   /* 获取选项参数以及前缀参数的位置 */
     {
         check_flag = OPT_PREFIX_RET(1, 2);
     }
@@ -493,13 +494,13 @@ static unsigned char check_args(int argc, char **argv)
         check_flag = OPT_PREFIX_RET(2, 1);
     }
 
+    /* 校验选项参数是否合法 */
     if(NULL == strchr(OPTIONS, (argv[GET_OPT(check_flag)])[1]))
     {
         printf("Invain options\n");
         check_flag = 0;
     }
 
-    //TODO: 现在允许填入两个相同的串口, 但是添加该功能会使逻辑变复杂, 当前是不考虑会出现相同串口的情况
     if (check_flag == 0)
     {
         printf("usage: %s <options> <com-prefix> [<com1> <com2>]\n"
@@ -554,23 +555,27 @@ static int selector(const struct dirent *dir_ent)
 }
 
 /*** 
- * @brief 对比buf1和buf2,将buf2与buf1不同的部分用不同的颜色显示出来
- * @param *buf1 [char]    
- * @param *buf2 [char]    
- * @return []
+ * @brief 对比buf1和buf2,将buf2与buf1不同的部分用不同的颜色显示出来(未经过充分测试)
+ * @param *buf1 [char]    参照字符串
+ * @param *buf2 [char]    对比字符串
+ * @return [void]
  */
 static void diff_buf(char *buf1, char *buf2)
 {
-    int diff_index[10];
+    /* 
+        本函数中，将以第一个不同的字符出现的索引作为一个周期的开始，直到出现第一个相
+        同的字符作为该周期的结束周期之间的字符全部以特殊颜色显示出来(不包括第一个相同的字符)
+     */
+
+    int diff_index[10];                 /* 记录周期开始、结束的节点 */
     int same_index[10];
-    int diff_point = 0;
+    int diff_point = 0;                 /* 记录节点的个数 */
     int same_point = 0;
-    int buf1_len, buf2_len, len;
+    int buf1_len, buf2_len, len;        /* 记录两个字符串的长度 */
     int i;
-    int diff_point_p = 0;
+    int diff_point_p = 0;               /* 当前处于的周期，从1开始计数 */
     int is_display_red = 0;
-    /* flah=1, 找相同的点, 0找不同的点 */
-    int flag = 0;
+    int flag = 0;                       /* flah=1, 找相同的点, 0找不同的点 */
 
     memset(diff_index, -1, 10);
     memset(same_index, -1, 10);
@@ -606,17 +611,20 @@ static void diff_buf(char *buf1, char *buf2)
         }
     }
 
-    if (buf2_len > buf1_len)
+    /* 如果对比字符串比参照字符串长，当查找结束后仍在寻找新的周期的开始，则以参照字符串长度的索引为开始，作为新周期的开始 */
+    if ((buf2_len > buf1_len) && (flag==0))
     {
         diff_index[diff_point++] = i;
         flag = 1;
     }
 
+    /* 如果直到循环结束都在寻找当前周期的结束，则将最后一个字符的索引作为结束 */
     if (flag == 1)
     {
-        same_index[same_point++] = buf2_len-1;
+        same_index[same_point++] = buf2_len;
     }
 
+    /* 打印比较完成后的字符串 */
     for (size_t i = 0; i < buf2_len; i++)
     {
         if (i>=same_index[diff_point_p])
@@ -652,15 +660,17 @@ static void diff_buf(char *buf1, char *buf2)
  */
 static int check_com_args(char **com_args, struct dirent **s_comlist, int s_com_count)
 {
-    int check_flag = 0;
-    int i, com1_inx, com2_inx;
-    struct dirent temp1;
+    int check_flag = 0;         /* 检查通过标志计数 */
+    int i, com1_inx, com2_inx;  /* com1_inx,com2_inx: 记录两个参数在comlist中匹配的索引 */
+    struct dirent temp1;        /* 临时变量 */
     struct dirent temp2;
 
+    /* 循环比较列表中的成员是否包含传入的参数 */
     for (i = 0; i < s_com_count; i++)
     {
         if (strcmp(com_args[0], (s_comlist)[i]->d_name) == 0) 
         {
+            /* 记录索引，递增标志计数 */
             com1_inx = i;
             check_flag++;
         }
@@ -697,6 +707,13 @@ static int check_com_args(char **com_args, struct dirent **s_comlist, int s_com_
     }
 }
 
+/*** 
+ * @brief 添加项目到列表
+ * @param list [char**]        列表
+ * @param count [int*]         列表中已存在的项目个数
+ * @param failed_name [char*]  需要添加的项目
+ * @return [void]
+ */
 static void add_failed_list(char **list, int *count, char *failed_name)
 {
     list[*count] = malloc(sizeof(char)*(strlen(failed_name)+1));
@@ -704,14 +721,22 @@ static void add_failed_list(char **list, int *count, char *failed_name)
     (*count)++;
 }
 
+/***
+ * @brief 释放字符串列表空间
+ * @param list_len [int]    列表长度
+ * @param list [char**] 需要释放的列表
+ * @return [void]
+ */
 static void free_list(int list_len, char **list)
 {
     int i;
 
+    /* 循环释放列表项目 */
     for (i = 0; i < list_len; i++)
     {
         free(list[i]);
     }
 
+    /* 释放列表自身 */
     free(list);
 }
