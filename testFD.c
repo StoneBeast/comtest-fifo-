@@ -3,9 +3,11 @@
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
  * @LastEditors  : Please set LastEditors
- * @LastEditTime : 2024-11-28 10:36:53
+ * @LastEditTime : 2024-11-28 17:53:44
  * @Description  : 使用fifo模拟串口，测试程序
  */
+
+// TODO: 解决单数串口问题，解决debug时两个串口选项指定同一个串口设备的问题
 
 #define _GNU_SOURCE
 
@@ -21,6 +23,7 @@
 
 #define IS_DEBUG    1
 #define TEST_SELF   1
+#define DEBUG_INFO  0
 
 #define BUF_LEN 126-33+1+1
 #define READ_FD 0
@@ -58,11 +61,11 @@ static void display_connection(int com_count, struct dirent **com_name);
 static int selector(const struct dirent *dir_ent);
 static void diff_buf(char *buf1, char *buf2);
 static int check_com_args(char **com_args, struct dirent **comlist, int com_count);
+static void add_failed_list(char **list, int *count, char *failed_name);
+static void free_list(int list_len, char **list);
 
 static sem_t sem_mw_tr, sem_mr_tw;
 static char* com_prefix;
-static struct dirent **comlist;
-static int com_count;
 
 /*** 
  * @brief 
@@ -85,8 +88,15 @@ int main(int argc, char **argv)
     int end = END_SIG;
     unsigned char arg_ret;
     char option_ret;
+    struct dirent **comlist;
+    int com_count;
+    int failed_count = 0;
+    char **test_failed_list;
 
+
+#if DEBUG_INFO
     int m_temp_sem_val;
+#endif // !DEBUG_INFO
 
 #if IS_DEBUG==1
     int test_i;
@@ -128,11 +138,10 @@ int main(int argc, char **argv)
 
         option_ret = OPTION_EACHOTHER;
         com_count = 2;
-        printf("index [1]: name: %s\n", comlist[1]->d_name);
     }
 
-    printf("opt: %c\n", option_ret);
-
+    /* 申请与总设备数量相同的空间，用于存放测试失败的设备 */
+    test_failed_list = malloc(sizeof(char*)*com_count);
 
     /* 填充测试数据，覆盖所有可视字符 */
     for (i = 0; i < BUF_LEN; i++) 
@@ -203,7 +212,6 @@ int main(int argc, char **argv)
                 sprintf(t_fifo_name, "%s/%s", DEV_DIR, comlist[t_i]->d_name);
                 /* 打开设备 */
                 t_fifo_fd = open(t_fifo_name, O_RDWR);
-                printf("open t_fifo: %d\n", t_fifo_fd);
                 if (t_fifo_fd<=0)
                 {
                     printf("open %s error\n", t_fifo_name);
@@ -212,10 +220,11 @@ int main(int argc, char **argv)
             }
             
             /* 通过pipe将需要测试的设备fd发送给接收线程，并通过post信号量通知子线程 */
-            // write(pipe_fd[WRITE_FD], &t_fifo_fd, sizeof(int));
             write(pipe_fd[WRITE_FD], &t_fifo_fd, sizeof(int));
+#if DEBUG_INFO
             sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
             printf("%d:sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
+#endif //! DEBUG_INFO
             sem_post(&sem_mw_tr);
     
 #if IS_DEBUG==1
@@ -228,22 +237,28 @@ int main(int argc, char **argv)
 #endif  //!IS_DEBUG==1
                 /* 发送测试数据，并通过post信号量通知子线程 */
                 write(m_fifo_fd, test_buf, BUF_LEN);
+#if DEBUG_INFO
                 sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
                 printf("%d:sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
-                sem_post(&sem_mw_tr);
+#endif //! DEBUG_INFO
+                // sem_post(&sem_mw_tr);
 #if IS_DEBUG == 1
             }
 #endif //! IS_DEBUG==1
 
-            /* 等待子线程接收完成，并接收结果 */
+#if DEBUG_INFO
             sem_getvalue(&sem_mr_tw, &m_temp_sem_val);
             printf("%d:sem_mr_tw: %d\n", __LINE__, m_temp_sem_val);
+#endif //! DEBUG_INFO
+            /* 等待子线程接收完成，并接收结果 */
             sem_wait(&sem_mr_tw);
             read(pipe_fd[READ_FD], write_buf, BUF_LEN);
             
             /* 对结果进行判断 */
             if (strcmp(write_buf, "timeout") == 0)
             {
+                // failed_count++;
+                add_failed_list(test_failed_list, &failed_count, t_fifo_name);
                 // printf("%s send\n%s recv\n", m_fifo_name, t_fifo_name);
                 printf("%s send: %s\n", m_fifo_name, test_buf);
                 printf("%s recv: %s\n", t_fifo_name, write_buf);
@@ -252,12 +267,16 @@ int main(int argc, char **argv)
             }
             else if(strcmp(write_buf, "error") == 0)
             {
+                // failed_count++;
+                add_failed_list(test_failed_list, &failed_count, t_fifo_name);
                 printf("%s send\n%s recv\n", m_fifo_name, t_fifo_name);
                 printf("\e[1;31m timeout error\e[0m\n");
                 printf("===========================================\n");
             }
             else if(memcmp(write_buf, test_buf, BUF_LEN) != 0)
             {
+                // failed_count++;
+                add_failed_list(test_failed_list, &failed_count, t_fifo_name);
                 printf("%s send: %s\n", m_fifo_name, test_buf);
                 // printf("%s recv: %s\n", t_fifo_name, write_buf);
                 printf("%s recv: ", t_fifo_name);
@@ -269,9 +288,9 @@ int main(int argc, char **argv)
             {
                 // printf("%s send: %s\n", m_fifo_name, test_buf);
                 // printf("%s recv: %s\n", t_fifo_name, write_buf);
-                printf("%s send\n", m_fifo_name);
-                printf("%s recv\n", t_fifo_name);
-                printf("\e[1;32m ok \e[0m\n");
+                printf("%s send \e[1;32m ok \e[0m\n", m_fifo_name);
+                printf("%s recv \e[1;32m ok \e[0m\n", t_fifo_name);
+                printf("\e[1;32m Test Pass \e[0m\n");
                 printf("===========================================\n");
             }
             /* 关闭当前设备 */
@@ -280,13 +299,17 @@ int main(int argc, char **argv)
             {
                 close(t_fifo_fd);
             }
+#if DEBUG_INFO
             printf("close fifo\n");
+#endif //! DEBUG_INFO
         // }
     }
 
     /* 向子线程发送结束信号，并通知 */
+#if DEBUG_INFO
     sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
     printf("%d:sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
+#endif //! DEBUG_INFO
     write(pipe_fd[WRITE_FD], &end, sizeof(int));
     sem_post(&sem_mw_tr);
 
@@ -295,6 +318,20 @@ int main(int argc, char **argv)
 
     /* 释放namelist */
     free(comlist);
+
+    printf("com total count: %d\n", com_count);
+    printf("test passed count: \e[1;32m%d\e[0m\n", (com_count - failed_count));
+    printf("test failed count: \e[1;31m%d\e[0m\t", (failed_count));
+
+    for (i = 0; i < failed_count; i++)
+    {
+        printf("\e[1;31m%s\e[0m\t", test_failed_list[i]);
+    }
+
+    printf("\n");
+
+    /* 释放test_failed_list的所有空间 */
+    free_list(failed_count, test_failed_list);
 
     return 0;
 }
@@ -313,7 +350,9 @@ static void *thread_task(void *arg)
     int err;
     char read_buf[BUF_LEN] = {0};
 
+#if DEBUG_INFO
     int t_temp_sem_val;
+#endif //! DEBUG_INFO
 
 #if IS_DEBUG == 1
     int t_i = 0;
@@ -325,8 +364,10 @@ static void *thread_task(void *arg)
     while (1)
     {
         /* 等待主线程发送传输完成的通知 */
+#if DEBUG_INFO
         sem_getvalue(&sem_mw_tr, &t_temp_sem_val);
         printf("%d:sem_mw_tr: %d\n", __LINE__, t_temp_sem_val);
+#endif //! DEBUG_INFO
         sem_wait(&sem_mw_tr);
         /* 读取需要接收设备的fd */
         read(t_pipe_fd[READ_FD], &t_fifo_fd, sizeof(int));
@@ -350,8 +391,10 @@ static void *thread_task(void *arg)
             if (err == 0)
             {
                 write(t_pipe_fd[WRITE_FD], "timeout", 8);
+#if DEBUG_INFO
                 sem_getvalue(&sem_mr_tw, &t_temp_sem_val);
                 printf("%d:sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
+#endif //! DEBUG_INFO
                 sem_post(&sem_mr_tw);
             }
             /* select发生错误 */
@@ -359,17 +402,21 @@ static void *thread_task(void *arg)
             {
                 // printf("error\n");
                 write(t_pipe_fd[WRITE_FD], "error", 6);
+#if DEBUG_INFO
                 sem_getvalue(&sem_mr_tw, &t_temp_sem_val);
                 printf("%d:sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
+#endif //! DEBUG_INFO
                 sem_post(&sem_mr_tw);
             }
             /* 接收到数据 */
             else
             {
-                /* 等待发送完成通知 */
+#if DEBUG_INFO
                 sem_getvalue(&sem_mw_tr, &t_temp_sem_val);
                 printf("%d:sem_mw_tr: %d\n", __LINE__, t_temp_sem_val);
-                sem_wait(&sem_mw_tr);
+#endif //! DEBUG_INFO
+                // sem_wait(&sem_mw_tr);
+                /* 等待发送完成通知 */
                 read(t_fifo_fd, read_buf, BUF_LEN);
 
 #if IS_DEBUG == 1
@@ -379,16 +426,20 @@ static void *thread_task(void *arg)
                 }
 #endif //! IS_DEBUG==1
 
-                /* 发送接收结果，并通知主线程 */
+#if DEBUG_INFO
                 sem_getvalue(&sem_mr_tw, &t_temp_sem_val);
                 printf("%d:sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
+#endif //! DEBUG_INFO
+                /* 发送接收结果，并通知主线程 */
                 write(t_pipe_fd[WRITE_FD], read_buf, BUF_LEN);
                 sem_post(&sem_mr_tw);
             }
         }
         else
         {
+#if DEBUG_INFO
             printf("end\n");
+#endif //! DEBUG_INFO
             return 0;
         }
     }
@@ -470,13 +521,13 @@ static unsigned char check_args(int argc, char **argv)
  * @param com_name [**dirent]  串口设备文件实例数组
  * @return [void]
  */
-static void display_connection(int com_count, struct dirent **com_name)
+static void display_connection(int s_com_count, struct dirent **com_name)
 {
     int i;
 
-    for (i = 0; i < com_count; i+=2)
+    for (i = 0; i < s_com_count; i+=2)
     {
-        if (i+1 >= com_count)
+        if (i+1 >= s_com_count)
         {
             printf("\e[1;31m%6s\e[0m\n", com_name[i]->d_name);
         }
@@ -606,13 +657,15 @@ static int check_com_args(char **com_args, struct dirent **s_comlist, int s_com_
     struct dirent temp1;
     struct dirent temp2;
 
-    for (i = 0; i < com_count; i++)
+    for (i = 0; i < s_com_count; i++)
     {
         if (strcmp(com_args[0], (s_comlist)[i]->d_name) == 0) 
         {
             com1_inx = i;
             check_flag++;
         }
+        /* 允许两个测试串口选择同一个 */
+        // if (strcmp(com_args[1], (s_comlist)[i]->d_name) == 0)
         else if (strcmp(com_args[1], (s_comlist)[i]->d_name) == 0)
         {
             com2_inx = i;
@@ -642,4 +695,23 @@ static int check_com_args(char **com_args, struct dirent **s_comlist, int s_com_
         /* 有串口不存在 */
         return 0;
     }
+}
+
+static void add_failed_list(char **list, int *count, char *failed_name)
+{
+    list[*count] = malloc(sizeof(char)*(strlen(failed_name)+1));
+    strcpy(list[*count], failed_name);
+    (*count)++;
+}
+
+static void free_list(int list_len, char **list)
+{
+    int i;
+
+    for (i = 0; i < list_len; i++)
+    {
+        free(list[i]);
+    }
+
+    free(list);
 }
