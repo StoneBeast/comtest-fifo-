@@ -3,11 +3,11 @@
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
  * @LastEditors  : Please set LastEditors
- * @LastEditTime : 2024-11-29 10:16:40
+ * @LastEditTime : 2024-11-29 10:28:22
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
-// TODO: 解决debug时两个串口选项指定同一个串口设备的问题, 目前在使用 '-d fifo' 命令时会出现预料之外的行为导致程序崩溃
+// TODO: 解决debug时两个串口选项指定同一个串口设备的问题
 
 #define _GNU_SOURCE
 
@@ -480,17 +480,17 @@ static unsigned char check_args(int argc, char **argv)
     if (argc != 3 && argc != 5)
     {
         check_flag = 0;
-        printf("too many or less args\n");
+        printf("\e[1;31mToo many or less args\e[0m\n");
     }
     else if ((argv[1])[0] != '-' && (argv[2])[0] != '-') 
     {
         check_flag = 0;
-        printf("no options\n");
+        printf("\e[1;31mNo options\e[0m\n");
     }
     else if ((argv[1])[0] == '-' && (argv[2])[0] == '-') 
     {
         check_flag = 0;
-        printf("no com-prefix\n");
+        printf("\e[1;31mNo com-prefix\e[0m\n");
     }
     else if ((argv[1])[0] == '-')   /* 获取选项参数以及前缀参数的位置 */
     {
@@ -504,8 +504,15 @@ static unsigned char check_args(int argc, char **argv)
     /* 校验选项参数是否合法 */
     if(NULL == strchr(OPTIONS, (argv[GET_OPT(check_flag)])[1]))
     {
-        printf("Invain options\n");
+        printf("\e[1;31mInvain options\e[0m\n");
         check_flag = 0;
+    }
+
+    /* 检查某些特定组合 */
+    if (argc != 5 && ((argv[GET_OPT(check_flag)])[1] == OPTION_DEBUGCOM))
+    {
+        check_flag = 0;
+        printf("\e[1;31m-d Must have 2 COM args\e[0m\n");
     }
 
     if (check_flag == 0)
