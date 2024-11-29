@@ -3,7 +3,7 @@
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
  * @LastEditors  : Please set LastEditors
- * @LastEditTime : 2024-11-29 10:28:22
+ * @LastEditTime : 2024-11-29 17:01:05
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
@@ -20,10 +20,11 @@
 #include <unistd.h>
 #include <string.h>
 #include <semaphore.h>
+#include <sys/ioctl.h>
 
 #define IS_DEBUG    1   /* 测试模式标志 */
 #define TEST_SELF   1   /* 自测功能测试标志 */
-#define DEBUG_INFO  0   /* debug输出标志 */
+#define DEBUG_INFO  1   /* debug输出标志 */
 
 #define BUF_LEN 126-33+1+1
 #define READ_FD 0
@@ -38,6 +39,18 @@
 #define OPTION_SELFTEST     's'
 #define OPTION_EACHOTHER    'e'
 #define OPTION_DEBUGCOM     'd'
+
+#if !IS_DEBUG //! IS_DEBUG==1
+#define MODE_RS232 0x00
+#define MODE_RS422 0x01
+#define MODE_RS485 0x02
+
+#define FIOBAUDRATE 0x1002
+#define FIOSETOPTIONS 0x1003
+#define FIOFLUSH 0x1004
+#define SERIAL_MODE_SET 0x1005
+#define CS8 0000060
+#endif //! IS_DEBUG==1
 
 #if IS_DEBUG == 1
 
@@ -119,7 +132,7 @@ int main(int argc, char **argv)
     /* 获取所有待测设备，并按照名称排序 */
     com_count = scandir(DEV_DIR, &comlist, selector, versionsort);
     printf("count: %d\n", com_count);
-
+    
     if (option_ret == OPTION_CONNECTION)
     {
         printf("\e[1;32mconnections:\e[0m\n");
@@ -176,6 +189,9 @@ int main(int argc, char **argv)
         /* 拼接设备文件完整路径 */
         sprintf(m_fifo_name, "%s/%s", DEV_DIR, comlist[i]->d_name);
 
+        /* 清空接收buffer */
+        memset(write_buf, 0, BUF_LEN);
+
         /* 打开设备 */
         // TODO: 由于用于模拟设备的fifo的限制，只能都以读写模式打开，实际的环境中可以测试以只写模式打开
         if (option_ret == OPTION_SELFTEST)
@@ -192,6 +208,12 @@ int main(int argc, char **argv)
             printf("open %s error\n", m_fifo_name);
             return -1;
         }
+
+#if !IS_DEBUG //! IS_DEBUG==1
+        ioctl(m_fifo_fd, FIOSETOPTIONS, CS8);
+        ioctl(m_fifo_fd, FIOBAUDRATE, 115200);
+        ioctl(m_fifo_fd, SERIAL_MODE_SET, MODE_RS422);
+#endif //! IS_DEBUG==1
 
         /* 如果当前是自测，则子线程需要监听的设备fd以及设备文件名均与主线程相同 */
         if (option_ret == OPTION_SELFTEST)
@@ -220,6 +242,12 @@ int main(int argc, char **argv)
                 printf("open %s error\n", t_fifo_name);
                 return -1;
             }
+
+#if !IS_DEBUG //! IS_DEBUG==1
+            ioctl(t_fifo_fd, FIOSETOPTIONS, CS8);
+            ioctl(t_fifo_fd, FIOBAUDRATE, 115200);
+            ioctl(t_fifo_fd, SERIAL_MODE_SET, MODE_RS422);
+#endif //! IS_DEBUG==1
         }
         
         /* 通过pipe将需要测试的设备fd发送给接收线程，并通过post信号量通知子线程 */
@@ -296,10 +324,20 @@ int main(int argc, char **argv)
             printf("\e[1;32m Test Pass \e[0m\n");
             printf("===========================================\n");
         }
+
+#if !IS_DEBUG //! IS_DEBUG==1
+        /* 复位fifo */
+        ioctl(m_fifo_fd, FIOFLUSH, 0);
+#endif //! IS_DEBUG==1
+
         /* 关闭当前设备 */
         close(m_fifo_fd);
         if (option_ret == OPTION_EACHOTHER)
         {
+#if !IS_DEBUG //! IS_DEBUG==1
+            /* 复位fifo */
+            ioctl(t_fifo_fd, FIOFLUSH, 0);
+#endif //! IS_DEBUG==1
             close(t_fifo_fd);
         }
 #if DEBUG_INFO
@@ -370,6 +408,8 @@ static void *thread_task(void *arg)
 
     while (1)
     {
+        /* 开始前线先清空buffer */
+        memset(read_buf, 0, BUF_LEN);
         /* 等待主线程发送传输完成的通知 */
 #if DEBUG_INFO
         sem_getvalue(&sem_mw_tr, &t_temp_sem_val);
@@ -393,7 +433,9 @@ static void *thread_task(void *arg)
             FD_SET(t_fifo_fd, &t_rset);
             /* 监听设备 */
             err = select(t_fifo_fd+1, &t_rset, NULL, NULL, &t_wait_time);
-
+#if DEBUG_INFO
+            printf("select, err: %d\n", err);
+#endif //! DEBUG_INFO
             /* 超时，未接受到数据 */
             if (err == 0)
             {
@@ -439,6 +481,9 @@ static void *thread_task(void *arg)
 #endif //! DEBUG_INFO
                 /* 发送接收结果，并通知主线程 */
                 write(t_pipe_fd[WRITE_FD], read_buf, BUF_LEN);
+#if DEBUG_INFO
+                printf("thread recv: %s\n", read_buf);
+#endif //! DEBUG_INFO
                 sem_post(&sem_mr_tw);
             }
         }
@@ -548,7 +593,7 @@ static void display_connection(int s_com_count, struct dirent **com_name)
         }
         else
         {
-            printf("\e[1;31m%6s\e[0m <---> \e[1;31m%.6s\e[0m\n", com_name[i]->d_name, com_name[i+1]->d_name);
+            printf("\e[1;31m%s\e[0m <---> \e[1;31m%s\e[0m\n", com_name[i]->d_name, com_name[i+1]->d_name);
         }
     }
 }
