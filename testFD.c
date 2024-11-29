@@ -3,11 +3,11 @@
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
  * @LastEditors  : Please set LastEditors
- * @LastEditTime : 2024-11-28 18:39:32
+ * @LastEditTime : 2024-11-29 10:16:40
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
-// TODO: 解决单数串口问题，解决debug时两个串口选项指定同一个串口设备的问题
+// TODO: 解决debug时两个串口选项指定同一个串口设备的问题, 目前在使用 '-d fifo' 命令时会出现预料之外的行为导致程序崩溃
 
 #define _GNU_SOURCE
 
@@ -22,7 +22,7 @@
 #include <semaphore.h>
 
 #define IS_DEBUG    1   /* 测试模式标志 */
-#define TEST_SELF   0   /* 自测功能测试标志 */
+#define TEST_SELF   1   /* 自测功能测试标志 */
 #define DEBUG_INFO  0   /* debug输出标志 */
 
 #define BUF_LEN 126-33+1+1
@@ -92,9 +92,10 @@ int main(int argc, char **argv)
     int com_count;                  /* comlist的长度 */
     int failed_count = 0;           /* 测试未通过的设备数量 */
     char **test_failed_list;        /* 未通过测试的设备名称列表 */
+    int odd_count_flag = 0;         /* 对测，且设备个数为奇数标志 */
 
 #if DEBUG_INFO
-    int m_temp_sem_val;
+        int m_temp_sem_val;
 #endif // !DEBUG_INFO
 
 #if IS_DEBUG==1
@@ -139,6 +140,12 @@ int main(int argc, char **argv)
         com_count = 2;
     }
 
+    if ((option_ret == OPTION_EACHOTHER) && (com_count%2 == 1))
+    {
+        odd_count_flag = 1;
+        com_count --;
+    }
+
     /* 申请与总设备数量相同的空间，用于存放测试失败的设备 */
     test_failed_list = malloc(sizeof(char*)*com_count);
 
@@ -161,148 +168,143 @@ int main(int argc, char **argv)
 #endif //! IS_DEBUG==1
 
     /* 循环获取目录下的所有文件对象 */
-    // while ((fifo_ent=readdir(fifo_dir)) != NULL)
     for (i=0; i<com_count; i++)
     {
-        // /* 通过匹配前缀对结果进行筛选 */
-        // if (strncmp(com_prefix, fifo_ent->d_name, strlen(com_prefix)) == 0)
-        // {
 #if IS_DEBUG==1
-            test_i++;
+        test_i++;
 #endif //! IS_DEBUG==1
-            /* 拼接设备文件完整路径 */
-            sprintf(m_fifo_name, "%s/%s", DEV_DIR, comlist[i]->d_name);
+        /* 拼接设备文件完整路径 */
+        sprintf(m_fifo_name, "%s/%s", DEV_DIR, comlist[i]->d_name);
 
-            /* 打开设备 */
-            // TODO: 由于用于模拟设备的fifo的限制，只能都以读写模式打开，实际的环境中可以测试以只写模式打开
-            if (option_ret == OPTION_SELFTEST)
+        /* 打开设备 */
+        // TODO: 由于用于模拟设备的fifo的限制，只能都以读写模式打开，实际的环境中可以测试以只写模式打开
+        if (option_ret == OPTION_SELFTEST)
+        {
+            m_fifo_fd = open(m_fifo_name, O_RDWR);
+        }
+        else
+        {
+            m_fifo_fd = open(m_fifo_name, O_RDWR);
+        }
+
+        if (m_fifo_fd<=0)
+        {
+            printf("open %s error\n", m_fifo_name);
+            return -1;
+        }
+
+        /* 如果当前是自测，则子线程需要监听的设备fd以及设备文件名均与主线程相同 */
+        if (option_ret == OPTION_SELFTEST)
+        {
+            strcpy(t_fifo_name, m_fifo_name);
+            t_fifo_fd = m_fifo_fd;
+        }
+        else    /* option_ret == OPTION_EACHOTHER */
+        {
+            /* 如果i为0或2的倍数，则说明当前进行的是一组对测的第一次测试 */
+            if (i%2 == 0)
             {
-                m_fifo_fd = open(m_fifo_name, O_RDWR);
+                t_i = i+1;
             }
             else
             {
-                m_fifo_fd = open(m_fifo_name, O_RDWR);
+                t_i = i-1;
             }
 
-            if (m_fifo_fd<=0)
+            /* 获取子线程需要监听的设备的文件名 */
+            sprintf(t_fifo_name, "%s/%s", DEV_DIR, comlist[t_i]->d_name);
+            /* 打开设备，理论可以以只读打开，原因详见上方TODO */
+            t_fifo_fd = open(t_fifo_name, O_RDWR);
+            if (t_fifo_fd<=0)
             {
-                printf("open %s error\n", m_fifo_name);
+                printf("open %s error\n", t_fifo_name);
                 return -1;
             }
+        }
+        
+        /* 通过pipe将需要测试的设备fd发送给接收线程，并通过post信号量通知子线程 */
+        write(pipe_fd[WRITE_FD], &t_fifo_fd, sizeof(int));
+#if DEBUG_INFO
+        sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
+        printf("%d:sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
+#endif //! DEBUG_INFO
+        sem_post(&sem_mw_tr);
 
-            /* 如果当前是自测，则子线程需要监听的设备fd以及设备文件名均与主线程相同 */
-            if (option_ret == OPTION_SELFTEST)
-            {
-                strcpy(t_fifo_name, m_fifo_name);
-                t_fifo_fd = m_fifo_fd;
-            }
-            else    /* option_ret == OPTION_EACHOTHER */
-            {
-                /* 如果i为0或2的倍数，则说明当前进行的是一组对测的第一次测试 */
-                if (i%2 == 0)
-                {
-                    t_i = i+1;
-                }
-                else
-                {
-                    t_i = i-1;
-                }
-
-                /* 获取子线程需要监听的设备的文件名 */
-                sprintf(t_fifo_name, "%s/%s", DEV_DIR, comlist[t_i]->d_name);
-                /* 打开设备，理论可以以只读打开，原因详见上方TODO */
-                t_fifo_fd = open(t_fifo_name, O_RDWR);
-                if (t_fifo_fd<=0)
-                {
-                    printf("open %s error\n", t_fifo_name);
-                    return -1;
-                }
-            }
-            
-            /* 通过pipe将需要测试的设备fd发送给接收线程，并通过post信号量通知子线程 */
-            write(pipe_fd[WRITE_FD], &t_fifo_fd, sizeof(int));
+#if IS_DEBUG==1
+        if (test_i == 3)
+        {
+            heavy_work();
+        }
+        else
+        {
+#endif  //!IS_DEBUG==1
+            /* 发送测试数据，并通过post信号量通知子线程 */
+            write(m_fifo_fd, test_buf, BUF_LEN);
 #if DEBUG_INFO
             sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
             printf("%d:sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
 #endif //! DEBUG_INFO
-            sem_post(&sem_mw_tr);
-    
-#if IS_DEBUG==1
-            if (test_i == 3)
-            {
-                heavy_work();
-            }
-            else
-            {
-#endif  //!IS_DEBUG==1
-                /* 发送测试数据，并通过post信号量通知子线程 */
-                write(m_fifo_fd, test_buf, BUF_LEN);
-#if DEBUG_INFO
-                sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
-                printf("%d:sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
-#endif //! DEBUG_INFO
-                // sem_post(&sem_mw_tr);
+            // sem_post(&sem_mw_tr);
 #if IS_DEBUG == 1
-            }
+        }
 #endif //! IS_DEBUG==1
 
 #if DEBUG_INFO
-            sem_getvalue(&sem_mr_tw, &m_temp_sem_val);
-            printf("%d:sem_mr_tw: %d\n", __LINE__, m_temp_sem_val);
+        sem_getvalue(&sem_mr_tw, &m_temp_sem_val);
+        printf("%d:sem_mr_tw: %d\n", __LINE__, m_temp_sem_val);
 #endif //! DEBUG_INFO
-            /* 等待子线程接收完成，并接收结果 */
-            sem_wait(&sem_mr_tw);
-            read(pipe_fd[READ_FD], write_buf, BUF_LEN);
-            
-            /* 对结果进行判断 */
-            if (strcmp(write_buf, "timeout") == 0)
-            {
-                // failed_count++;
-                add_failed_list(test_failed_list, &failed_count, t_fifo_name);
-                // printf("%s send\n%s recv\n", m_fifo_name, t_fifo_name);
-                printf("%s send: %s\n", m_fifo_name, test_buf);
-                printf("%s recv: %s\n", t_fifo_name, write_buf);
-                printf("\e[1;31m timeout error\e[0m\n");
-                printf("===========================================\n");
-            }
-            else if(strcmp(write_buf, "error") == 0)
-            {
-                // failed_count++;
-                add_failed_list(test_failed_list, &failed_count, t_fifo_name);
-                printf("%s send\n%s recv\n", m_fifo_name, t_fifo_name);
-                printf("\e[1;31m timeout error\e[0m\n");
-                printf("===========================================\n");
-            }
-            else if(memcmp(write_buf, test_buf, BUF_LEN) != 0)
-            {
-                // failed_count++;
-                add_failed_list(test_failed_list, &failed_count, t_fifo_name);
-                printf("%s send: %s\n", m_fifo_name, test_buf);
-                // printf("%s recv: %s\n", t_fifo_name, write_buf);
-                printf("%s recv: ", t_fifo_name);
-                diff_buf(test_buf, write_buf);
-                printf("\e[1;31m error\e[0m\n");
-                printf("===========================================\n");
-            }
-            else
-            {
-                // printf("%s send: %s\n", m_fifo_name, test_buf);
-                // printf("%s recv: %s\n", t_fifo_name, write_buf);
-                printf("%s send \e[1;32m ok \e[0m\n", m_fifo_name);
-                printf("%s recv \e[1;32m ok \e[0m\n", t_fifo_name);
-                printf("\e[1;32m Test Pass \e[0m\n");
-                printf("===========================================\n");
-            }
-            /* 关闭当前设备 */
-            close(m_fifo_fd);
-            if (option_ret == OPTION_EACHOTHER)
-            {
-                close(t_fifo_fd);
-            }
+        /* 等待子线程接收完成，并接收结果 */
+        sem_wait(&sem_mr_tw);
+        read(pipe_fd[READ_FD], write_buf, BUF_LEN);
+        
+        /* 对结果进行判断 */
+        if (strcmp(write_buf, "timeout") == 0)
+        {
+            // failed_count++;
+            add_failed_list(test_failed_list, &failed_count, t_fifo_name);
+            // printf("%s send\n%s recv\n", m_fifo_name, t_fifo_name);
+            printf("%s send: %s\n", m_fifo_name, test_buf);
+            printf("%s recv: %s\n", t_fifo_name, write_buf);
+            printf("\e[1;31m timeout error\e[0m\n");
+            printf("===========================================\n");
+        }
+        else if(strcmp(write_buf, "error") == 0)
+        {
+            // failed_count++;
+            add_failed_list(test_failed_list, &failed_count, t_fifo_name);
+            printf("%s send\n%s recv\n", m_fifo_name, t_fifo_name);
+            printf("\e[1;31m timeout error\e[0m\n");
+            printf("===========================================\n");
+        }
+        else if(memcmp(write_buf, test_buf, BUF_LEN) != 0)
+        {
+            // failed_count++;
+            add_failed_list(test_failed_list, &failed_count, t_fifo_name);
+            printf("%s send: %s\n", m_fifo_name, test_buf);
+            // printf("%s recv: %s\n", t_fifo_name, write_buf);
+            printf("%s recv: ", t_fifo_name);
+            diff_buf(test_buf, write_buf);
+            printf("\e[1;31m error\e[0m\n");
+            printf("===========================================\n");
+        }
+        else
+        {
+            // printf("%s send: %s\n", m_fifo_name, test_buf);
+            // printf("%s recv: %s\n", t_fifo_name, write_buf);
+            printf("%s send \e[1;32m ok \e[0m\n", m_fifo_name);
+            printf("%s recv \e[1;32m ok \e[0m\n", t_fifo_name);
+            printf("\e[1;32m Test Pass \e[0m\n");
+            printf("===========================================\n");
+        }
+        /* 关闭当前设备 */
+        close(m_fifo_fd);
+        if (option_ret == OPTION_EACHOTHER)
+        {
+            close(t_fifo_fd);
+        }
 #if DEBUG_INFO
-            printf("close fifo\n");
+        printf("close fifo\n");
 #endif //! DEBUG_INFO
-        // }
     }
 
 #if DEBUG_INFO
@@ -319,7 +321,7 @@ int main(int argc, char **argv)
     /* 释放namelist */
     free(comlist);
 
-    printf("com total count: %d\n", com_count);
+    // printf("com total count: %d\n", com_count);
     printf("test passed count: \e[1;32m%d\e[0m\n", (com_count - failed_count));
     printf("test failed count: \e[1;31m%d\e[0m\t", (failed_count));
 
@@ -329,6 +331,11 @@ int main(int argc, char **argv)
     }
 
     printf("\n");
+
+     if (odd_count_flag)
+    {
+        printf("not test count: 1\t\e[1;31m%s\e[0m\n", comlist[com_count]->d_name);
+    }
 
     /* 释放test_failed_list的所有空间 */
     free_list(failed_count, test_failed_list);
