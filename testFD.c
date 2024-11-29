@@ -3,7 +3,7 @@
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
  * @LastEditors  : Please set LastEditors
- * @LastEditTime : 2024-11-29 17:01:05
+ * @LastEditTime : 2024-11-29 18:17:49
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
@@ -254,7 +254,7 @@ int main(int argc, char **argv)
         write(pipe_fd[WRITE_FD], &t_fifo_fd, sizeof(int));
 #if DEBUG_INFO
         sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
-        printf("%d:sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
+        printf("%d: m: send fifo fd: sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
 #endif //! DEBUG_INFO
         sem_post(&sem_mw_tr);
 
@@ -270,7 +270,7 @@ int main(int argc, char **argv)
             write(m_fifo_fd, test_buf, BUF_LEN);
 #if DEBUG_INFO
             sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
-            printf("%d:sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
+            printf("%d: m: after send buf: sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
 #endif //! DEBUG_INFO
             // sem_post(&sem_mw_tr);
 #if IS_DEBUG == 1
@@ -279,7 +279,7 @@ int main(int argc, char **argv)
 
 #if DEBUG_INFO
         sem_getvalue(&sem_mr_tw, &m_temp_sem_val);
-        printf("%d:sem_mr_tw: %d\n", __LINE__, m_temp_sem_val);
+        printf("%d: m: wait response: sem_mr_tw: %d\n", __LINE__, m_temp_sem_val);
 #endif //! DEBUG_INFO
         /* 等待子线程接收完成，并接收结果 */
         sem_wait(&sem_mr_tw);
@@ -347,7 +347,7 @@ int main(int argc, char **argv)
 
 #if DEBUG_INFO
     sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
-    printf("%d:sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
+    printf("%d: m: send end: sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
 #endif //! DEBUG_INFO
     /* 向子线程发送结束信号，并通知 */
     write(pipe_fd[WRITE_FD], &end, sizeof(int));
@@ -413,7 +413,7 @@ static void *thread_task(void *arg)
         /* 等待主线程发送传输完成的通知 */
 #if DEBUG_INFO
         sem_getvalue(&sem_mw_tr, &t_temp_sem_val);
-        printf("%d:sem_mw_tr: %d\n", __LINE__, t_temp_sem_val);
+        printf("%d: t: wait fifo fd: sem_mw_tr: %d\n", __LINE__, t_temp_sem_val);
 #endif //! DEBUG_INFO
         sem_wait(&sem_mw_tr);
         /* 读取需要接收设备的fd */
@@ -442,7 +442,7 @@ static void *thread_task(void *arg)
                 write(t_pipe_fd[WRITE_FD], "timeout", 8);
 #if DEBUG_INFO
                 sem_getvalue(&sem_mr_tw, &t_temp_sem_val);
-                printf("%d:sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
+                printf("%d: t: send response: sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
 #endif //! DEBUG_INFO
                 sem_post(&sem_mr_tw);
             }
@@ -453,7 +453,7 @@ static void *thread_task(void *arg)
                 write(t_pipe_fd[WRITE_FD], "error", 6);
 #if DEBUG_INFO
                 sem_getvalue(&sem_mr_tw, &t_temp_sem_val);
-                printf("%d:sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
+                printf("%d: t: send response: sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
 #endif //! DEBUG_INFO
                 sem_post(&sem_mr_tw);
             }
@@ -462,7 +462,7 @@ static void *thread_task(void *arg)
             {
 #if DEBUG_INFO
                 sem_getvalue(&sem_mw_tr, &t_temp_sem_val);
-                printf("%d:sem_mw_tr: %d\n", __LINE__, t_temp_sem_val);
+                printf("%d: t: before read buf: sem_mw_tr: %d\n", __LINE__, t_temp_sem_val);
 #endif //! DEBUG_INFO
                 // sem_wait(&sem_mw_tr);
                 /* 等待发送完成通知 */
@@ -477,7 +477,7 @@ static void *thread_task(void *arg)
 
 #if DEBUG_INFO
                 sem_getvalue(&sem_mr_tw, &t_temp_sem_val);
-                printf("%d:sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
+                printf("%d: t: before send response: sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
 #endif //! DEBUG_INFO
                 /* 发送接收结果，并通知主线程 */
                 write(t_pipe_fd[WRITE_FD], read_buf, BUF_LEN);
