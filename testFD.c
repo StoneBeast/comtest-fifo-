@@ -3,11 +3,12 @@
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
  * @LastEditors  : Please set LastEditors
- * @LastEditTime : 2024-11-30 15:35:36
+ * @LastEditTime : 2024-11-30 18:26:47
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
-// TODO: 解决debug时两个串口选项指定同一个串口设备的问题
+// TODO: 优化debug时选择同一个串口的调用流程
+// TODO: 考虑log文件命名规则，处理ANSI控制字符输出到文件
 
 #define _GNU_SOURCE
 
@@ -21,6 +22,7 @@
 #include <string.h>
 #include <semaphore.h>
 #include <sys/ioctl.h>
+#include <stdarg.h>
 
 #define IS_DEBUG    1   /* 测试模式标志 */
 #define TEST_SELF   1   /* 自测功能测试标志 */
@@ -39,6 +41,10 @@
 #define OPTION_SELFTEST     's'
 #define OPTION_EACHOTHER    'e'
 #define OPTION_DEBUGCOM     'd'
+#define LOG_CONSOLE     ((unsigned char)(0x00FF))
+#define LOG_FILE        ((unsigned char)(0xFF00))
+#define LOG_CONSOLE_ASSERT(t)   ((t & LOG_CONSOLE) == LOG_CONSOLE)
+#define LOG_FILE_ASSERT(t)      ((t & LOG_FILE) == LOG_FILE)
 
 #if !IS_DEBUG //! IS_DEBUG==1
 #define MODE_RS232 0x00
@@ -77,6 +83,7 @@ static int check_com_args(char **com_args, struct dirent **comlist, int com_coun
 static void add_failed_list(char **list, int *count, char *failed_name);
 static void free_list(int list_len, char **list);
 static int try_read(int fd, char* buf);
+static void log_out(unsigned char log_type, const char *fmt, ...);
 
 static sem_t sem_mw_tr, sem_mr_tw;
 static char* com_prefix;
@@ -131,11 +138,11 @@ int main(int argc, char **argv)
 
     /* 获取所有待测设备，并按照名称排序 */
     com_count = scandir(DEV_DIR, &comlist, selector, versionsort);
-    printf("count: %d\n", com_count);
+    log_out(LOG_CONSOLE, "count: %d\n", com_count);
     
     if (option_ret == OPTION_CONNECTION)
     {
-        printf("\e[1;32mconnections:\e[0m\n");
+        log_out(LOG_CONSOLE, "\e[1;32mconnections:\e[0m\n");
         display_connection(com_count, comlist);
         return 0;
     }
@@ -145,7 +152,7 @@ int main(int argc, char **argv)
     {
         if (check_com_args(&(argv[3]), comlist, com_count) == 0)
         {
-            printf("error: invalid com device name\n");
+            log_out(LOG_CONSOLE, "error: invalid com device name\n");
             return -1;
         }
 
@@ -205,7 +212,7 @@ int main(int argc, char **argv)
 
         if (m_fifo_fd<=0)
         {
-            printf("open %s error\n", m_fifo_name);
+            log_out(LOG_CONSOLE, "open %s error\n", m_fifo_name);
             return -1;
         }
 
@@ -241,7 +248,7 @@ int main(int argc, char **argv)
         write(pipe_fd[WRITE_FD], t_fifo_name, (strlen(t_fifo_name)+1));
 #if DEBUG_INFO
         sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
-        printf("%d: m: send fifo fd: sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
+        log_out(LOG_CONSOLE, "%d: m: send fifo fd: sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
 #endif //! DEBUG_INFO
         sem_post(&sem_mw_tr);
 
@@ -257,7 +264,7 @@ int main(int argc, char **argv)
             write(m_fifo_fd, test_buf, BUF_LEN);
 #if DEBUG_INFO
             sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
-            printf("%d: m: after send buf: sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
+            log_out(LOG_CONSOLE, "%d: m: after send buf: sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
 #endif //! DEBUG_INFO
 
 #if IS_DEBUG == 1
@@ -266,7 +273,7 @@ int main(int argc, char **argv)
 
 #if DEBUG_INFO
         sem_getvalue(&sem_mr_tw, &m_temp_sem_val);
-        printf("%d: m: wait response: sem_mr_tw: %d\n", __LINE__, m_temp_sem_val);
+        log_out(LOG_CONSOLE, "%d: m: wait response: sem_mr_tw: %d\n", __LINE__, m_temp_sem_val);
 #endif //! DEBUG_INFO
         /* 等待子线程接收完成，并接收结果 */
         sem_wait(&sem_mr_tw);
@@ -275,54 +282,49 @@ int main(int argc, char **argv)
         /* 对结果进行判断 */
         if (strcmp(write_buf, "timeout") == 0)
         {
-            // failed_count++;
             add_failed_list(test_failed_list, &failed_count, t_fifo_name);
-            // printf("%s send\n%s recv\n", m_fifo_name, t_fifo_name);
-            printf("%s send: %s\n", m_fifo_name, test_buf);
-            printf("%s recv: %s\n", t_fifo_name, write_buf);
-            printf("\e[1;31m timeout error\e[0m\n");
-            printf("===========================================\n");
+            log_out(LOG_CONSOLE, "%s send: %s\n", m_fifo_name, test_buf);
+            log_out(LOG_CONSOLE, "%s recv: %s\n", t_fifo_name, write_buf);
+            log_out(LOG_CONSOLE, "\e[1;31m timeout error\e[0m\n");
+            log_out(LOG_CONSOLE, "===========================================\n");
         }
         else if(strcmp(write_buf, "error") == 0)
         {
-            // failed_count++;
             add_failed_list(test_failed_list, &failed_count, t_fifo_name);
-            printf("%s send\n%s recv\n", m_fifo_name, t_fifo_name);
-            printf("\e[1;31m timeout error\e[0m\n");
-            printf("===========================================\n");
+            log_out(LOG_CONSOLE, "%s send\n%s recv\n", m_fifo_name, t_fifo_name);
+            log_out(LOG_CONSOLE, "\e[1;31m timeout error\e[0m\n");
+            log_out(LOG_CONSOLE, "===========================================\n");
         }
         else if(memcmp(write_buf, test_buf, BUF_LEN) != 0)
         {
-            // failed_count++;
             add_failed_list(test_failed_list, &failed_count, t_fifo_name);
-            printf("%s send: %s\n", m_fifo_name, test_buf);
-            // printf("%s recv: %s\n", t_fifo_name, write_buf);
-            printf("%s recv: ", t_fifo_name);
+            log_out(LOG_CONSOLE, "%s send: %s\n", m_fifo_name, test_buf);
+            log_out(LOG_CONSOLE, "%s recv: ", t_fifo_name);
             diff_buf(test_buf, write_buf);
-            printf("\e[1;31m error\e[0m\n");
-            printf("===========================================\n");
+            log_out(LOG_CONSOLE, "\e[1;31m error\e[0m\n");
+            log_out(LOG_CONSOLE, "===========================================\n");
         }
         else
         {
-            // printf("%s send: %s\n", m_fifo_name, test_buf);
-            // printf("%s recv: %s\n", t_fifo_name, write_buf);
-            printf("%s send \e[1;32m ok \e[0m\n", m_fifo_name);
-            printf("%s recv \e[1;32m ok \e[0m\n", t_fifo_name);
-            printf("\e[1;32m Test Pass \e[0m\n");
-            printf("===========================================\n");
+            log_out(LOG_FILE, "%s send: %s\n", m_fifo_name, test_buf);
+            log_out(LOG_FILE, "%s recv: %s\n", t_fifo_name, write_buf);
+            log_out(LOG_CONSOLE, "%s send \e[1;32m ok \e[0m\n", m_fifo_name);
+            log_out(LOG_CONSOLE, "%s recv \e[1;32m ok \e[0m\n", t_fifo_name);
+            log_out(LOG_CONSOLE, "\e[1;32m Test Pass \e[0m\n");
+            log_out(LOG_CONSOLE, "===========================================\n");
         }
 
         /* 关闭当前设备 */
         close(m_fifo_fd);
 
 #if DEBUG_INFO
-        printf("close fifo\n");
+        log_out(LOG_CONSOLE, "close fifo\n");
 #endif //! DEBUG_INFO
     }
 
 #if DEBUG_INFO
     sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
-    printf("%d: m: send end: sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
+    log_out(LOG_CONSOLE, "%d: m: send end: sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
 #endif //! DEBUG_INFO
     /* 向子线程发送结束信号，并通知 */
     write(pipe_fd[WRITE_FD], END_SIG, strlen(END_SIG)+1);
@@ -334,20 +336,19 @@ int main(int argc, char **argv)
     /* 释放namelist */
     free(comlist);
 
-    // printf("com total count: %d\n", com_count);
-    printf("test passed count: \e[1;32m%d\e[0m\n", (com_count - failed_count));
-    printf("test failed count: \e[1;31m%d\e[0m\t", (failed_count));
+    log_out(LOG_CONSOLE, "test passed count: \e[1;32m%d\e[0m\n", (com_count - failed_count));
+    log_out(LOG_CONSOLE, "test failed count: \e[1;31m%d\e[0m\t", (failed_count));
 
     for (i = 0; i < failed_count; i++)
     {
-        printf("\e[1;31m%s\e[0m\t", test_failed_list[i]);
+        log_out(LOG_CONSOLE, "\e[1;31m%s\e[0m\t", test_failed_list[i]);
     }
 
-    printf("\n");
+    log_out(LOG_CONSOLE, "\n");
 
      if (odd_count_flag)
     {
-        printf("not test count: 1\t\e[1;31m%s\e[0m\n", comlist[com_count]->d_name);
+        log_out(LOG_CONSOLE, "not test count: 1\t\e[1;31m%s\e[0m\n", comlist[com_count]->d_name);
     }
 
     /* 释放test_failed_list的所有空间 */
@@ -389,12 +390,11 @@ static void *thread_task(void *arg)
         /* 等待主线程发送传输完成的通知 */
 #if DEBUG_INFO
         sem_getvalue(&sem_mw_tr, &t_temp_sem_val);
-        printf("%d: t: wait fifo fd: sem_mw_tr: %d\n", __LINE__, t_temp_sem_val);
+        log_out(LOG_CONSOLE, "%d: t: wait fifo fd: sem_mw_tr: %d\n", __LINE__, t_temp_sem_val);
 #endif //! DEBUG_INFO
         sem_wait(&sem_mw_tr);
         /* 读取需要接收设备的fd */
         read(t_pipe_fd[READ_FD], t_fifo_name, 280);
-        // printf("thread: get fd: %d\n", t_fifo_fd);
 
         /* 判断不为结束信号 */
         if (strncmp(END_SIG, t_fifo_name, strlen(END_SIG)) != 0 )
@@ -405,7 +405,7 @@ static void *thread_task(void *arg)
             t_fifo_fd = open(t_fifo_name, O_RDWR|O_NONBLOCK);
             if (t_fifo_fd<=0)
             {
-                printf("open %s error\n", t_fifo_name);
+                log_out(LOG_CONSOLE, "open %s error\n", t_fifo_name);
                 pthread_exit(&t_fifo_fd);
             }
 
@@ -420,7 +420,7 @@ static void *thread_task(void *arg)
                 write(t_pipe_fd[WRITE_FD], "timeout", 8);
 #if DEBUG_INFO
                 sem_getvalue(&sem_mr_tw, &t_temp_sem_val);
-                printf("%d: t: send response: sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
+                log_out(LOG_CONSOLE, "%d: t: send response: sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
 #endif //! DEBUG_INFO
                 sem_post(&sem_mr_tw);
             }
@@ -428,7 +428,7 @@ static void *thread_task(void *arg)
             {
 #if DEBUG_INFO
                 sem_getvalue(&sem_mw_tr, &t_temp_sem_val);
-                printf("%d: t: before read buf: sem_mw_tr: %d\n", __LINE__, t_temp_sem_val);
+                log_out(LOG_CONSOLE, "%d: t: before read buf: sem_mw_tr: %d\n", __LINE__, t_temp_sem_val);
 #endif //! DEBUG_INFO
 
 #if IS_DEBUG == 1
@@ -440,12 +440,12 @@ static void *thread_task(void *arg)
 
 #if DEBUG_INFO
                 sem_getvalue(&sem_mr_tw, &t_temp_sem_val);
-                printf("%d: t: before send response: sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
+                log_out(LOG_CONSOLE, "%d: t: before send response: sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
 #endif //! DEBUG_INFO
                 /* 发送接收结果，并通知主线程 */
                 write(t_pipe_fd[WRITE_FD], read_buf, BUF_LEN);
 #if DEBUG_INFO
-                printf("thread recv: %s\n", read_buf);
+                log_out(LOG_CONSOLE, "thread recv: %s\n", read_buf);
 #endif //! DEBUG_INFO
                 sem_post(&sem_mr_tw);
 
@@ -455,7 +455,7 @@ static void *thread_task(void *arg)
         else
         {
 #if DEBUG_INFO
-            printf("end\n");
+            log_out(LOG_CONSOLE, "end\n");
 #endif //! DEBUG_INFO
             return 0;
         }
@@ -490,17 +490,17 @@ static unsigned char check_args(int argc, char **argv)
     if (argc != 3 && argc != 5)
     {
         check_flag = 0;
-        printf("\e[1;31mToo many or less args\e[0m\n");
+        log_out(LOG_CONSOLE, "\e[1;31mToo many or less args\e[0m\n");
     }
     else if ((argv[1])[0] != '-' && (argv[2])[0] != '-') 
     {
         check_flag = 0;
-        printf("\e[1;31mNo options\e[0m\n");
+        log_out(LOG_CONSOLE, "\e[1;31mNo options\e[0m\n");
     }
     else if ((argv[1])[0] == '-' && (argv[2])[0] == '-') 
     {
         check_flag = 0;
-        printf("\e[1;31mNo com-prefix\e[0m\n");
+        log_out(LOG_CONSOLE, "\e[1;31mNo com-prefix\e[0m\n");
     }
     else if ((argv[1])[0] == '-')   /* 获取选项参数以及前缀参数的位置 */
     {
@@ -514,7 +514,7 @@ static unsigned char check_args(int argc, char **argv)
     /* 校验选项参数是否合法 */
     if(NULL == strchr(OPTIONS, (argv[GET_OPT(check_flag)])[1]))
     {
-        printf("\e[1;31mInvain options\e[0m\n");
+        log_out(LOG_CONSOLE, "\e[1;31mInvain options\e[0m\n");
         check_flag = 0;
     }
 
@@ -522,12 +522,12 @@ static unsigned char check_args(int argc, char **argv)
     if (argc != 5 && ((argv[GET_OPT(check_flag)])[1] == OPTION_DEBUGCOM))
     {
         check_flag = 0;
-        printf("\e[1;31m-d Must have 2 COM args\e[0m\n");
+        log_out(LOG_CONSOLE, "\e[1;31m-d Must have 2 COM args\e[0m\n");
     }
 
     if (check_flag == 0)
     {
-        printf("usage: %s <options> <com-prefix> [<com1> <com2>]\n"
+        log_out(LOG_CONSOLE, "usage: %s <options> <com-prefix> [<com1> <com2>]\n"
                             "\toptions:\n"
                                 "\t\t-e: one transmit one receive\n"
                                 "\t\t-s: self transmit and receive\n"
@@ -554,11 +554,11 @@ static void display_connection(int s_com_count, struct dirent **com_name)
     {
         if (i+1 >= s_com_count)
         {
-            printf("\e[1;31m%6s\e[0m\n", com_name[i]->d_name);
+            log_out(LOG_CONSOLE, "\e[1;31m%6s\e[0m\n", com_name[i]->d_name);
         }
         else
         {
-            printf("\e[1;31m%s\e[0m <---> \e[1;31m%s\e[0m\n", com_name[i]->d_name, com_name[i+1]->d_name);
+            log_out(LOG_CONSOLE, "\e[1;31m%s\e[0m <---> \e[1;31m%s\e[0m\n", com_name[i]->d_name, com_name[i+1]->d_name);
         }
     }
 }
@@ -656,23 +656,23 @@ static void diff_buf(char *buf1, char *buf2)
             /* 当前已经结束上一个周期 */
             diff_point_p++;
             is_display_red = 0;
-            printf("%c", buf2[i]);
+            log_out(LOG_CONSOLE, "%c", buf2[i]);
         }
         else if (i < diff_index[diff_point_p])
         {
             /* 说明当前周期还未开始 */
             // is_display_red = 0;
-            printf("%c", buf2[i]);
+            log_out(LOG_CONSOLE, "%c", buf2[i]);
         }
         else if (i>= diff_index[diff_point_p] && i< same_index[diff_point_p])
         {
             /* 当前在有误的周期中 */
             is_display_red = 1;
-            printf("\e[1;31m%c\e[0m", buf2[i]);
+            log_out(LOG_CONSOLE, "\e[1;31m%c\e[0m", buf2[i]);
         }
     }
 
-    printf("\n");
+    log_out(LOG_CONSOLE, "\n");
 }
 
 /*** 
@@ -810,4 +810,31 @@ static int try_read(int fd, char *buf)
     }
 
     return buf_len;
+}
+
+/***
+ * @brief 统一log输出管理
+ * @param log_type [unsigned char]  从以下值中选择1-2个: LOG_FILE;LOG_CONSOLE;分别控制log输出到console和log文件
+ * @param *fmt [char]               字符串模板, 用法类似printf
+ * @return [void]
+ */
+static void log_out(unsigned char log_type, const char *fmt, ...)
+{
+    char temp_log[512] = {0};   /* 临时存放处理之后的字符串 */
+    va_list args;               /* 参数列表 */
+
+    va_start(args, fmt);
+    vsprintf(temp_log, fmt, args);
+    va_end(args);
+
+    /* 是否输出到console */
+    if (LOG_CONSOLE_ASSERT(log_type))
+    {
+        printf("%s", temp_log);
+    }
+    /* 是否输出到log文件 */
+    if (LOG_FILE_ASSERT(log_type))
+    {
+
+    }
 }
