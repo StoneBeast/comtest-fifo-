@@ -3,7 +3,7 @@
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
  * @LastEditors  : Please set LastEditors
- * @LastEditTime : 2024-11-29 18:17:49
+ * @LastEditTime : 2024-11-30 15:35:36
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
@@ -24,12 +24,12 @@
 
 #define IS_DEBUG    1   /* 测试模式标志 */
 #define TEST_SELF   1   /* 自测功能测试标志 */
-#define DEBUG_INFO  1   /* debug输出标志 */
+#define DEBUG_INFO  0   /* debug输出标志 */
 
 #define BUF_LEN 126-33+1+1
 #define READ_FD 0
 #define WRITE_FD 1
-#define END_SIG 0x1234FAFA
+#define END_SIG "END"
 
 #define OPTIONS "ecsd"
 #define OPT_PREFIX_RET(opt,pre) ((unsigned char)((opt<<4)|(pre<<0)))
@@ -76,6 +76,7 @@ static void diff_buf(char *buf1, char *buf2);
 static int check_com_args(char **com_args, struct dirent **comlist, int com_count);
 static void add_failed_list(char **list, int *count, char *failed_name);
 static void free_list(int list_len, char **list);
+static int try_read(int fd, char* buf);
 
 static sem_t sem_mw_tr, sem_mr_tw;
 static char* com_prefix;
@@ -98,7 +99,6 @@ int main(int argc, char **argv)
     char t_fifo_name[280] = {0};
     int t_fifo_fd;
     pthread_t thread;               /* 子线程的句柄 */
-    int end = END_SIG;              /* 结束信号，由主线程在结束时发给子线程 */
     unsigned char arg_ret;          /* 接收check_args()返回的结果 */
     char option_ret;                /* 选中的选项 */
     struct dirent **comlist;        /* 存放所有符合条件的设备文件实例 */
@@ -235,23 +235,10 @@ int main(int argc, char **argv)
 
             /* 获取子线程需要监听的设备的文件名 */
             sprintf(t_fifo_name, "%s/%s", DEV_DIR, comlist[t_i]->d_name);
-            /* 打开设备，理论可以以只读打开，原因详见上方TODO */
-            t_fifo_fd = open(t_fifo_name, O_RDWR);
-            if (t_fifo_fd<=0)
-            {
-                printf("open %s error\n", t_fifo_name);
-                return -1;
-            }
-
-#if !IS_DEBUG //! IS_DEBUG==1
-            ioctl(t_fifo_fd, FIOSETOPTIONS, CS8);
-            ioctl(t_fifo_fd, FIOBAUDRATE, 115200);
-            ioctl(t_fifo_fd, SERIAL_MODE_SET, MODE_RS422);
-#endif //! IS_DEBUG==1
         }
         
         /* 通过pipe将需要测试的设备fd发送给接收线程，并通过post信号量通知子线程 */
-        write(pipe_fd[WRITE_FD], &t_fifo_fd, sizeof(int));
+        write(pipe_fd[WRITE_FD], t_fifo_name, (strlen(t_fifo_name)+1));
 #if DEBUG_INFO
         sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
         printf("%d: m: send fifo fd: sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
@@ -261,7 +248,7 @@ int main(int argc, char **argv)
 #if IS_DEBUG==1
         if (test_i == 3)
         {
-            heavy_work();
+            /* do nothing */
         }
         else
         {
@@ -272,7 +259,7 @@ int main(int argc, char **argv)
             sem_getvalue(&sem_mw_tr, &m_temp_sem_val);
             printf("%d: m: after send buf: sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
 #endif //! DEBUG_INFO
-            // sem_post(&sem_mw_tr);
+
 #if IS_DEBUG == 1
         }
 #endif //! IS_DEBUG==1
@@ -325,21 +312,9 @@ int main(int argc, char **argv)
             printf("===========================================\n");
         }
 
-#if !IS_DEBUG //! IS_DEBUG==1
-        /* 复位fifo */
-        ioctl(m_fifo_fd, FIOFLUSH, 0);
-#endif //! IS_DEBUG==1
-
         /* 关闭当前设备 */
         close(m_fifo_fd);
-        if (option_ret == OPTION_EACHOTHER)
-        {
-#if !IS_DEBUG //! IS_DEBUG==1
-            /* 复位fifo */
-            ioctl(t_fifo_fd, FIOFLUSH, 0);
-#endif //! IS_DEBUG==1
-            close(t_fifo_fd);
-        }
+
 #if DEBUG_INFO
         printf("close fifo\n");
 #endif //! DEBUG_INFO
@@ -350,7 +325,7 @@ int main(int argc, char **argv)
     printf("%d: m: send end: sem_mw_tr: %d\n", __LINE__, m_temp_sem_val);
 #endif //! DEBUG_INFO
     /* 向子线程发送结束信号，并通知 */
-    write(pipe_fd[WRITE_FD], &end, sizeof(int));
+    write(pipe_fd[WRITE_FD], END_SIG, strlen(END_SIG)+1);
     sem_post(&sem_mw_tr);
 
     /* 等待子线程退出 */
@@ -383,13 +358,14 @@ int main(int argc, char **argv)
 
 /*** 
  * @brief 接收线程任务函数
- * @param *arg [void]  子进程任务参数，这里传输的是主进程和子进程通信所使用的pipe的fd
- * @return [void* ] NULL
+ * @param *arg [void]   子进程任务参数，这里传输的是主进程和子进程通信所使用的pipe的fd
+ * @return [void* ]     NULL
  */
 static void *thread_task(void *arg)
 {
     int *t_pipe_fd;                 /* pipe fd */
     int t_fifo_fd;                  /* fifo(模拟设备)fd */
+    char t_fifo_name[280] = {0};    /* fifo(模拟设备)设备文件名 */
     fd_set t_rset;                  /* select参数，用于监听读事件 */
     struct timeval t_wait_time;
     int err;
@@ -417,27 +393,29 @@ static void *thread_task(void *arg)
 #endif //! DEBUG_INFO
         sem_wait(&sem_mw_tr);
         /* 读取需要接收设备的fd */
-        read(t_pipe_fd[READ_FD], &t_fifo_fd, sizeof(int));
+        read(t_pipe_fd[READ_FD], t_fifo_name, 280);
         // printf("thread: get fd: %d\n", t_fifo_fd);
 
         /* 判断不为结束信号 */
-        if (t_fifo_fd != END_SIG)
+        if (strncmp(END_SIG, t_fifo_name, strlen(END_SIG)) != 0 )
         {
 #if IS_DEBUG==1
             t_i++;
 #endif //! IS_DEBUG==1
-            /* 准备select所需参数，设置超时时间为200ms */
-            t_wait_time.tv_sec = 0;
-            t_wait_time.tv_usec = 1000*200;
-            FD_ZERO(&t_rset); 
-            FD_SET(t_fifo_fd, &t_rset);
-            /* 监听设备 */
-            err = select(t_fifo_fd+1, &t_rset, NULL, NULL, &t_wait_time);
-#if DEBUG_INFO
-            printf("select, err: %d\n", err);
-#endif //! DEBUG_INFO
-            /* 超时，未接受到数据 */
-            if (err == 0)
+            t_fifo_fd = open(t_fifo_name, O_RDWR|O_NONBLOCK);
+            if (t_fifo_fd<=0)
+            {
+                printf("open %s error\n", t_fifo_name);
+                pthread_exit(&t_fifo_fd);
+            }
+
+#if !IS_DEBUG //! IS_DEBUG==1
+            ioctl(t_fifo_fd, FIOSETOPTIONS, CS8);
+            ioctl(t_fifo_fd, FIOBAUDRATE, 115200);
+            ioctl(t_fifo_fd, SERIAL_MODE_SET, MODE_RS422);
+#endif //! IS_DEBUG==1
+
+            if (try_read(t_fifo_fd, read_buf) == 0)
             {
                 write(t_pipe_fd[WRITE_FD], "timeout", 8);
 #if DEBUG_INFO
@@ -446,27 +424,12 @@ static void *thread_task(void *arg)
 #endif //! DEBUG_INFO
                 sem_post(&sem_mr_tw);
             }
-            /* select发生错误 */
-            else if (err == -1) 
-            {
-                // printf("error\n");
-                write(t_pipe_fd[WRITE_FD], "error", 6);
-#if DEBUG_INFO
-                sem_getvalue(&sem_mr_tw, &t_temp_sem_val);
-                printf("%d: t: send response: sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
-#endif //! DEBUG_INFO
-                sem_post(&sem_mr_tw);
-            }
-            /* 接收到数据 */
             else
             {
 #if DEBUG_INFO
                 sem_getvalue(&sem_mw_tr, &t_temp_sem_val);
                 printf("%d: t: before read buf: sem_mw_tr: %d\n", __LINE__, t_temp_sem_val);
 #endif //! DEBUG_INFO
-                // sem_wait(&sem_mw_tr);
-                /* 等待发送完成通知 */
-                read(t_fifo_fd, read_buf, BUF_LEN);
 
 #if IS_DEBUG == 1
                 if (t_i == 4)
@@ -485,6 +448,8 @@ static void *thread_task(void *arg)
                 printf("thread recv: %s\n", read_buf);
 #endif //! DEBUG_INFO
                 sem_post(&sem_mr_tw);
+
+                close(t_fifo_fd);
             }
         }
         else
@@ -513,9 +478,9 @@ static void heavy_work(void)
 
 /*** 
  * @brief   判断参数合法性，并返回options的索引；强制要求前两个参数一个是选项，一个是前缀
- * @param argc [int]    参数个数
- * @param argv [char**] 参数数组
- * @return [unsigned char] 0: 参数非法 [0:3]:prefix的位置, [4:7]:option的位置
+ * @param argc [int]        参数个数
+ * @param argv [char**]     参数数组
+ * @return [unsigned char]  0: 参数非法 [0:3]:prefix的位置, [4:7]:option的位置
  */
 static unsigned char check_args(int argc, char **argv)
 {
@@ -577,8 +542,8 @@ static unsigned char check_args(int argc, char **argv)
 
 /*** 
  * @brief 打印串口连接关系
- * @param com_count [int] 串口数量   
- * @param com_name [**dirent]  串口设备文件实例数组
+ * @param com_count [int]       串口数量   
+ * @param com_name [**dirent]   串口设备文件实例数组
  * @return [void]
  */
 static void display_connection(int s_com_count, struct dirent **com_name)
@@ -600,8 +565,8 @@ static void display_connection(int s_com_count, struct dirent **com_name)
 
 /*** 
  * @brief 用于scandir()中筛选符合条件的设备文件
- * @param *dir_ent [dirent]  待筛选的dirent对象指针
- * @return [int]    返回非0值该对象即被选中
+ * @param *dir_ent [dirent]     待筛选的dirent对象指针
+ * @return [int]                返回非0值该对象即被选中
  */
 static int selector(const struct dirent *dir_ent)
 {
@@ -712,10 +677,10 @@ static void diff_buf(char *buf1, char *buf2)
 
 /*** 
  * @brief 检查指定的两个参数串口是否存在
- * @param argv [char**]    传入的com参数的列表
- * @param comlist [struct dirent***]  out: 指向系统中所有待测的设备文件列表的指针,参数合法时会返回只含有参数的列表指针
- * @param com_count [int]    comlist的长度
- * @return [int]: 1: 参数合法; 0: 参数非法
+ * @param argv [char**]                 传入的com参数的列表
+ * @param comlist [struct dirent***]    out: 指向系统中所有待测的设备文件列表的指针,参数合法时会返回只含有参数的列表指针
+ * @param com_count [int]               comlist的长度
+ * @return [int]:                       1: 参数合法; 0: 参数非法
  */
 static int check_com_args(char **com_args, struct dirent **s_comlist, int s_com_count)
 {
@@ -768,9 +733,9 @@ static int check_com_args(char **com_args, struct dirent **s_comlist, int s_com_
 
 /*** 
  * @brief 添加项目到列表
- * @param list [char**]        列表
- * @param count [int*]         列表中已存在的项目个数
- * @param failed_name [char*]  需要添加的项目
+ * @param list [char**]         列表
+ * @param count [int*]          列表中已存在的项目个数
+ * @param failed_name [char*]   需要添加的项目
  * @return [void]
  */
 static void add_failed_list(char **list, int *count, char *failed_name)
@@ -798,4 +763,51 @@ static void free_list(int list_len, char **list)
 
     /* 释放列表自身 */
     free(list);
+}
+
+/*** 
+ * @brief 尝试读取fd
+ * @param fd [int]      句柄    
+ * @param buf [char*]   out: 存放读取的数据
+ * @return [int]        返回读取到的数据的长度
+ */
+static int try_read(int fd, char *buf)
+{
+    int read_len = 0;   /* 单次读取的数据长度 */
+    char temp_buf[255]; /* 临时存放读取的数据 */
+    int buf_len = 0;    /* 放入buf的累计长度 */
+    int times = 0;      /* 读取次数计数 */
+
+    /* 最大尝试读取次数为100次 */
+    while (times < 100)
+    {
+        /* 尝试读取，并保存结果 */
+        read_len = read(fd, temp_buf, 255);
+
+        /* 如果读取到数据，则退出循环，进行接下来的读取 */
+        if(read_len > 0)
+        {
+            break;
+        }
+        times ++;
+        /* 两次尝试读取间隙为2ms */
+        usleep(2 * 1000);
+    }
+
+    /* 超时未读到数据 */
+    if (read_len <= 0)
+    {
+        return 0;
+    }
+
+    /* 将数据存储到buf中 */
+    while (read_len > 0) 
+    {
+        memcpy((buf+buf_len), temp_buf, read_len);
+        buf_len += read_len;
+        buf[buf_len] = 0;
+        read_len = read(fd, temp_buf, 255);
+    }
+
+    return buf_len;
 }
