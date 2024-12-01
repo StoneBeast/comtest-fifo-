@@ -3,12 +3,15 @@
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
  * @LastEditors  : Please set LastEditors
- * @LastEditTime : 2024-11-30 18:26:47
+ * @LastEditTime : 2024-12-01 18:09:26
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
 // TODO: 优化debug时选择同一个串口的调用流程
 // TODO: 考虑log文件命名规则，处理ANSI控制字符输出到文件
+// TODO: 从驱动来看，串口设备也没有提供非阻塞的读取方式，当前方法可能需要重置，可以采用再创建一个子线程，专门用于读取，并在次线程中计时的方式
+// TODO: 中断读取线程可以尝试使用pthread_cancel()
+// TODO: 在每轮测试来开始之前可以先尝试读取以下接收串口，防止缓冲区中有数据，但是如果在非阻塞状态下，流程可能会变得稍微复杂一些
 
 #define _GNU_SOURCE
 
