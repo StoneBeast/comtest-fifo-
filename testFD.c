@@ -2,8 +2,7 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditors  : Please set LastEditors
- * @LastEditTime : 2024-12-02 14:40:09
+ * @LastEditTime : 2024-12-02 23:34:19
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
@@ -11,6 +10,11 @@
 // TODO: 考虑log文件命名规则，处理ANSI控制字符输出到文件
 // TODO: 从程序健壮性的角度考虑，线程创建失败以及线程结束失败的情况
 // TODO: 参考其他程序处理传入参数的处理流程
+// TODO: 可以考虑添加进度条
+// BUG:  修复打印测试数据时，最后一个字符会出现异常字符
+// TODO: 可以将出现错误的打印恢复出来
+// TODO: 修改log文件存储逻辑
+// TODO: 考虑添加-l和-h
 
 #define _GNU_SOURCE
 
@@ -30,23 +34,26 @@
 #define TEST_SELF   1   /* 自测功能测试标志 */
 #define DEBUG_INFO  0   /* debug输出标志 */
 
-#define BUF_LEN 126-33+1+1
-#define READ_FD 0
-#define WRITE_FD 1
-#define END_SIG "END"
+#define BUF_LEN     126-33+1+1  /* buffer长度 */
+#define READ_FD     0           /* pipe read/write fd */
+#define WRITE_FD    1
+#define END_SIG     "END"       /* 测试结束标志 */
 
-#define OPTIONS "ecsd"
-#define OPT_PREFIX_RET(opt,pre) ((unsigned char)((opt<<4)|(pre<<0)))
-#define GET_OPT(ret)    ((unsigned char)((ret>>4)&(0x0f)))
-#define GET_PREFIX(ret)    ((unsigned char)((ret)&(0x0f)))
-#define OPTION_CONNECTION   'c'
-#define OPTION_SELFTEST     's'
-#define OPTION_EACHOTHER    'e'
-#define OPTION_DEBUGCOM     'd'
-#define LOG_CONSOLE     ((unsigned short)(0x00FF))
-#define LOG_FILE        ((unsigned short)(0xFF00))
-#define LOG_CONSOLE_ASSERT(t)   ((t & LOG_CONSOLE) == LOG_CONSOLE)
+#define OPTIONS                 "ecsd"                                  /* 合法的options，用于判断 */
+#define OPT_PREFIX_RET(opt,pre) ((unsigned char)((opt<<4)|(pre<<0)))    /* 将options和prefix的位置信息放入一个8bit的数据中 */
+#define GET_OPT(ret)            ((unsigned char)((ret>>4)&(0x0f)))      /* 获取options的位置信息 */
+#define GET_PREFIX(ret)         ((unsigned char)((ret)&(0x0f)))         /* 获取prefix的位置信息 */
+#define OPTION_CONNECTION       'c'                                     /* options */
+#define OPTION_SELFTEST         's'
+#define OPTION_EACHOTHER        'e'
+#define OPTION_DEBUGCOM         'd'
+#define LOG_CONSOLE             ((unsigned short)(0x00FF))              /* log输出类型: 终端/log file输出 */
+#define LOG_FILE                ((unsigned short)(0xFF00))
+#define LOG_CONSOLE_ASSERT(t)   ((t & LOG_CONSOLE) == LOG_CONSOLE)      /* 判断log输出类型 */
 #define LOG_FILE_ASSERT(t)      ((t & LOG_FILE) == LOG_FILE)
+#define COM_NUM(name)           (name[strlen(DEV_DIR)] == '/' ? name + strlen(DEV_DIR) + strlen(com_prefix) + 1     \
+                                : name + strlen(com_prefix))            /* 获取传入设备名称设备编号开始的字符地址 */
+#define OUT_NAME(name)          "COM",COM_NUM(name)                     /* 配合字符串模板输出 %s%s 输出COMx形式的设备名称 */
 
 #if !IS_DEBUG //! IS_DEBUG==1
 #define MODE_RS232 0x00
@@ -89,9 +96,9 @@ static void* read_task(void *arg);
 static int try_get_result(int wait_ms);
 static void base_info_store(int argc, char **argv, int com_count, struct dirent **comlist);
 
-static sem_t sem_mw_tr, sem_mr_tw, sem_rt;
-static char* com_prefix;
-static int log_fd;
+static sem_t sem_mw_tr, sem_mr_tw, sem_rt;  /* 主线程与子线程之间用于线程同步，子线程与读取线程之间用于轮询读取 */
+static char* com_prefix;                    /* 设备前缀 */
+static int log_fd;                          /* log文件fd */
 
 /*** 
  * @brief 
@@ -224,7 +231,7 @@ int main(int argc, char **argv)
 
         if (m_fifo_fd<=0)
         {
-            log_out(LOG_CONSOLE, "open %s error\n", m_fifo_name);
+            log_out(LOG_CONSOLE, "open %s%s error\n", OUT_NAME(m_fifo_name));
             return -1;
         }
 
@@ -305,35 +312,35 @@ int main(int argc, char **argv)
         if (strcmp(write_buf, "timeout") == 0)
         {
             add_failed_list(test_failed_list, &failed_count, t_fifo_name);
-            log_out(LOG_FILE|LOG_CONSOLE, "%s send: %s\n", m_fifo_name, test_buf);
-            log_out(LOG_FILE|LOG_CONSOLE, "%s recv: %s\n", t_fifo_name, write_buf);
-            log_out(LOG_FILE|LOG_CONSOLE, "\e[1;31m timeout error\e[0m\n");
-            log_out(LOG_FILE|LOG_CONSOLE, "===========================================\n");
+            log_out(LOG_FILE, "%s%s send: %s\n", OUT_NAME(m_fifo_name), test_buf);
+            log_out(LOG_FILE, "%s%s recv: %s\n", OUT_NAME(t_fifo_name), write_buf);
+            log_out(LOG_FILE, "\e[1;31m timeout error\e[0m\n");
+            log_out(LOG_FILE, "===========================================\n");
         }
         else if(strcmp(write_buf, "error") == 0)
         {
             add_failed_list(test_failed_list, &failed_count, t_fifo_name);
-            log_out(LOG_FILE|LOG_CONSOLE, "%s send\n%s recv\n", m_fifo_name, t_fifo_name);
-            log_out(LOG_FILE|LOG_CONSOLE, "\e[1;31m timeout error\e[0m\n");
-            log_out(LOG_FILE|LOG_CONSOLE, "===========================================\n");
+            log_out(LOG_FILE, "%s%s send\n%s%s recv\n", OUT_NAME(m_fifo_name), OUT_NAME(t_fifo_name));
+            log_out(LOG_FILE, "\e[1;31m timeout error\e[0m\n");
+            log_out(LOG_FILE, "===========================================\n");
         }
         else if(memcmp(write_buf, test_buf, BUF_LEN) != 0)
         {
             add_failed_list(test_failed_list, &failed_count, t_fifo_name);
-            log_out(LOG_FILE|LOG_CONSOLE, "%s send: %s\n", m_fifo_name, test_buf);
-            log_out(LOG_FILE|LOG_CONSOLE, "%s recv: ", t_fifo_name);
+            log_out(LOG_FILE, "%s%s send: %s\n", OUT_NAME(m_fifo_name), test_buf);
+            log_out(LOG_FILE, "%s%s recv: ", OUT_NAME(t_fifo_name));
             diff_buf(test_buf, write_buf);
-            log_out(LOG_FILE|LOG_CONSOLE, "\e[1;31m error\e[0m\n");
-            log_out(LOG_FILE|LOG_CONSOLE, "===========================================\n");
+            log_out(LOG_FILE, "\e[1;31m error\e[0m\n");
+            log_out(LOG_FILE, "===========================================\n");
         }
         else
         {
-            log_out(LOG_FILE, "%s send: %s\n", m_fifo_name, test_buf);
-            log_out(LOG_FILE, "%s recv: %s\n", t_fifo_name, write_buf);
-            log_out(LOG_FILE|LOG_CONSOLE, "%s send \e[1;32m ok \e[0m\n", m_fifo_name);
-            log_out(LOG_FILE|LOG_CONSOLE, "%s recv \e[1;32m ok \e[0m\n", t_fifo_name);
-            log_out(LOG_FILE|LOG_CONSOLE, "\e[1;32m Test Pass \e[0m\n");
-            log_out(LOG_FILE|LOG_CONSOLE, "===========================================\n");
+            log_out(LOG_FILE, "%s%s send: %s\n", OUT_NAME(m_fifo_name), test_buf);
+            log_out(LOG_FILE, "%s%s recv: %s\n", OUT_NAME(t_fifo_name), write_buf);
+            log_out(LOG_FILE, "%s%s send \e[1;32m ok \e[0m\n", OUT_NAME(m_fifo_name));
+            log_out(LOG_FILE, "%s%s recv \e[1;32m ok \e[0m\n", OUT_NAME(t_fifo_name));
+            log_out(LOG_FILE, "\e[1;32m Test Pass \e[0m\n");
+            log_out(LOG_FILE, "===========================================\n");
         }
 
         /* 关闭当前设备 */
@@ -363,14 +370,14 @@ int main(int argc, char **argv)
 
     for (i = 0; i < failed_count; i++)
     {
-        log_out(LOG_FILE | LOG_CONSOLE, "\e[1;31m%s\e[0m\t", test_failed_list[i]);
+        log_out(LOG_FILE | LOG_CONSOLE, "\e[1;31m%s%s\e[0m\t", OUT_NAME(test_failed_list[i]));
     }
 
     log_out(LOG_FILE|LOG_CONSOLE, "\n");
 
      if (odd_count_flag)
     {
-        log_out(LOG_FILE|LOG_CONSOLE, "not test count: 1\t\e[1;31m%s\e[0m\n", comlist[com_count]->d_name);
+        log_out(LOG_FILE|LOG_CONSOLE, "not test count: 1\t\e[1;31m%s%s\e[0m\n", OUT_NAME(comlist[com_count]->d_name));
     }
 
     /* 释放test_failed_list的所有空间 */
@@ -430,7 +437,7 @@ static void *thread_task(void *arg)
             // t_fifo_fd = open(t_fifo_name, O_RDWR|O_NONBLOCK);
             if (t_fifo_fd<=0)
             {
-                log_out(LOG_CONSOLE, "open %s error\n", t_fifo_name);
+                log_out(LOG_CONSOLE, "open %s%s error\n", OUT_NAME(t_fifo_name));
                 pthread_exit(&t_fifo_fd);
             }
 
@@ -605,11 +612,13 @@ static void display_connection(int s_com_count, struct dirent **com_name)
     {
         if (i+1 >= s_com_count)
         {
-            log_out(LOG_CONSOLE, "\e[1;31m%6s\e[0m\n", com_name[i]->d_name);
+            log_out(LOG_CONSOLE, "\e[1;31m%s%s\e[0m\n", OUT_NAME(com_name[i]->d_name));
         }
         else
         {
-            log_out(LOG_CONSOLE, "\e[1;31m%s\e[0m <---> \e[1;31m%s\e[0m\n", com_name[i]->d_name, com_name[i+1]->d_name);
+          log_out(LOG_CONSOLE, "\e[1;31m%s%s\e[0m <---> \e[1;31m%s%s\e[0m\n",
+                            OUT_NAME(com_name[i]->d_name),
+                            OUT_NAME(com_name[i + 1]->d_name));
         }
     }
 }
@@ -707,23 +716,23 @@ static void diff_buf(char *buf1, char *buf2)
             /* 当前已经结束上一个周期 */
             diff_point_p++;
             is_display_red = 0;
-            log_out(LOG_CONSOLE, "%c", buf2[i]);
+            log_out(LOG_FILE, "%c", buf2[i]);
         }
         else if (i < diff_index[diff_point_p])
         {
             /* 说明当前周期还未开始 */
             // is_display_red = 0;
-            log_out(LOG_CONSOLE, "%c", buf2[i]);
+            log_out(LOG_FILE, "%c", buf2[i]);
         }
         else if (i>= diff_index[diff_point_p] && i< same_index[diff_point_p])
         {
             /* 当前在有误的周期中 */
             is_display_red = 1;
-            log_out(LOG_CONSOLE, "\e[1;31m%c\e[0m", buf2[i]);
+            log_out(LOG_FILE, "\e[1;31m%c\e[0m", buf2[i]);
         }
     }
 
-    log_out(LOG_CONSOLE, "\n");
+    log_out(LOG_FILE, "\n");
 }
 
 /*** 
@@ -825,7 +834,9 @@ static void free_list(int list_len, char **list)
 static void log_out(unsigned short log_type, const char *fmt, ...)
 {
     int i;
+    int file_i = 0;
     char temp_log[512] = {0};   /* 临时存放处理之后的字符串 */
+    char file_log[512] = {0};
     va_list args;               /* 参数列表 */
 
     va_start(args, fmt);
@@ -844,18 +855,22 @@ static void log_out(unsigned short log_type, const char *fmt, ...)
         {
             if (temp_log[i] == '\e')
             {
+                i++;
                 while (temp_log[i] != 'm') 
                 {
-                    temp_log[i] = 2;
                     i++;
                 }
                 if (temp_log[i] == 'm')
                 {
-                    temp_log[i] = 2;
+                    i++;
                 }
             }
+            if (temp_log[i] != '\e')
+            {
+                file_log[file_i++] = temp_log[i];
+            }
         }
-        write(log_fd, temp_log, strlen(temp_log));
+        write(log_fd, file_log, strlen(file_log));
     }
 }
 
@@ -922,10 +937,19 @@ static int try_get_result(int wait_ms)
     return 0;
 }
 
+/*** 
+ * @brief 存储当前测试基本环境
+ * @param argc [int]                argv项目数量
+ * @param argv [char**]             参数数组
+ * @param com_count [int]           测试的串口数量
+ * @param comlist [struct dirent**] 测试的串口设备文件实例数组   
+ * @return [void]
+ */
 static void base_info_store(int argc, char **argv, int com_count, struct dirent **comlist)
 {
     int i;
 
+    /* 记录启动测试的命令 */
     log_out(LOG_FILE, "command: ");
     for (i = 0; i< argc; i++)
     {
@@ -933,13 +957,14 @@ static void base_info_store(int argc, char **argv, int com_count, struct dirent 
     }
     log_out(LOG_FILE, " \n");
 
+    /* 记录参与测试的串口数量 */
     log_out(LOG_FILE, "device count: %d\n", com_count);
 
+    /* 罗列串口 */
     log_out(LOG_FILE, "device list: ");
-
     for (i = 0; i < com_count; i++)
     {
-        log_out(LOG_FILE, "%s ", comlist[i]->d_name);
+        log_out(LOG_FILE, "%s%s ", OUT_NAME(comlist[i]->d_name));
     }
     log_out(LOG_FILE, " \n\n");
 }
