@@ -3,7 +3,7 @@
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
  * @LastEditors  : Please set LastEditors
- * @LastEditTime : 2024-12-02 13:53:07
+ * @LastEditTime : 2024-12-02 14:40:09
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
@@ -43,8 +43,8 @@
 #define OPTION_SELFTEST     's'
 #define OPTION_EACHOTHER    'e'
 #define OPTION_DEBUGCOM     'd'
-#define LOG_CONSOLE     ((unsigned char)(0x00FF))
-#define LOG_FILE        ((unsigned char)(0xFF00))
+#define LOG_CONSOLE     ((unsigned short)(0x00FF))
+#define LOG_FILE        ((unsigned short)(0xFF00))
 #define LOG_CONSOLE_ASSERT(t)   ((t & LOG_CONSOLE) == LOG_CONSOLE)
 #define LOG_FILE_ASSERT(t)      ((t & LOG_FILE) == LOG_FILE)
 
@@ -84,12 +84,14 @@ static void diff_buf(char *buf1, char *buf2);
 static int check_com_args(char **com_args, struct dirent **comlist, int com_count);
 static void add_failed_list(char **list, int *count, char *failed_name);
 static void free_list(int list_len, char **list);
-static void log_out(unsigned char log_type, const char *fmt, ...);
+static void log_out(unsigned short log_type, const char *fmt, ...);
 static void* read_task(void *arg);
 static int try_get_result(int wait_ms);
+static void base_info_store(int argc, char **argv, int com_count, struct dirent **comlist);
 
 static sem_t sem_mw_tr, sem_mr_tw, sem_rt;
 static char* com_prefix;
+static int log_fd;
 
 /*** 
  * @brief 
@@ -168,6 +170,13 @@ int main(int argc, char **argv)
         odd_count_flag = 1;
         com_count --;
     }
+
+    log_fd = open("./log.txt", O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (log_fd == -1)
+    {
+        log_out(LOG_CONSOLE, "create log file error\n");
+    }
+    base_info_store(argc, argv,(odd_count_flag? com_count+1:com_count), comlist);
 
     /* 申请与总设备数量相同的空间，用于存放测试失败的设备 */
     test_failed_list = malloc(sizeof(char*)*com_count);
@@ -296,35 +305,35 @@ int main(int argc, char **argv)
         if (strcmp(write_buf, "timeout") == 0)
         {
             add_failed_list(test_failed_list, &failed_count, t_fifo_name);
-            log_out(LOG_CONSOLE, "%s send: %s\n", m_fifo_name, test_buf);
-            log_out(LOG_CONSOLE, "%s recv: %s\n", t_fifo_name, write_buf);
-            log_out(LOG_CONSOLE, "\e[1;31m timeout error\e[0m\n");
-            log_out(LOG_CONSOLE, "===========================================\n");
+            log_out(LOG_FILE|LOG_CONSOLE, "%s send: %s\n", m_fifo_name, test_buf);
+            log_out(LOG_FILE|LOG_CONSOLE, "%s recv: %s\n", t_fifo_name, write_buf);
+            log_out(LOG_FILE|LOG_CONSOLE, "\e[1;31m timeout error\e[0m\n");
+            log_out(LOG_FILE|LOG_CONSOLE, "===========================================\n");
         }
         else if(strcmp(write_buf, "error") == 0)
         {
             add_failed_list(test_failed_list, &failed_count, t_fifo_name);
-            log_out(LOG_CONSOLE, "%s send\n%s recv\n", m_fifo_name, t_fifo_name);
-            log_out(LOG_CONSOLE, "\e[1;31m timeout error\e[0m\n");
-            log_out(LOG_CONSOLE, "===========================================\n");
+            log_out(LOG_FILE|LOG_CONSOLE, "%s send\n%s recv\n", m_fifo_name, t_fifo_name);
+            log_out(LOG_FILE|LOG_CONSOLE, "\e[1;31m timeout error\e[0m\n");
+            log_out(LOG_FILE|LOG_CONSOLE, "===========================================\n");
         }
         else if(memcmp(write_buf, test_buf, BUF_LEN) != 0)
         {
             add_failed_list(test_failed_list, &failed_count, t_fifo_name);
-            log_out(LOG_CONSOLE, "%s send: %s\n", m_fifo_name, test_buf);
-            log_out(LOG_CONSOLE, "%s recv: ", t_fifo_name);
+            log_out(LOG_FILE|LOG_CONSOLE, "%s send: %s\n", m_fifo_name, test_buf);
+            log_out(LOG_FILE|LOG_CONSOLE, "%s recv: ", t_fifo_name);
             diff_buf(test_buf, write_buf);
-            log_out(LOG_CONSOLE, "\e[1;31m error\e[0m\n");
-            log_out(LOG_CONSOLE, "===========================================\n");
+            log_out(LOG_FILE|LOG_CONSOLE, "\e[1;31m error\e[0m\n");
+            log_out(LOG_FILE|LOG_CONSOLE, "===========================================\n");
         }
         else
         {
             log_out(LOG_FILE, "%s send: %s\n", m_fifo_name, test_buf);
             log_out(LOG_FILE, "%s recv: %s\n", t_fifo_name, write_buf);
-            log_out(LOG_CONSOLE, "%s send \e[1;32m ok \e[0m\n", m_fifo_name);
-            log_out(LOG_CONSOLE, "%s recv \e[1;32m ok \e[0m\n", t_fifo_name);
-            log_out(LOG_CONSOLE, "\e[1;32m Test Pass \e[0m\n");
-            log_out(LOG_CONSOLE, "===========================================\n");
+            log_out(LOG_FILE|LOG_CONSOLE, "%s send \e[1;32m ok \e[0m\n", m_fifo_name);
+            log_out(LOG_FILE|LOG_CONSOLE, "%s recv \e[1;32m ok \e[0m\n", t_fifo_name);
+            log_out(LOG_FILE|LOG_CONSOLE, "\e[1;32m Test Pass \e[0m\n");
+            log_out(LOG_FILE|LOG_CONSOLE, "===========================================\n");
         }
 
         /* 关闭当前设备 */
@@ -349,19 +358,19 @@ int main(int argc, char **argv)
     /* 释放namelist */
     free(comlist);
 
-    log_out(LOG_CONSOLE, "test passed count: \e[1;32m%d\e[0m\n", (com_count - failed_count));
-    log_out(LOG_CONSOLE, "test failed count: \e[1;31m%d\e[0m\t", (failed_count));
+    log_out(LOG_FILE|LOG_CONSOLE, "test passed count: \e[1;32m%d\e[0m\n", (com_count - failed_count));
+    log_out(LOG_FILE|LOG_CONSOLE, "test failed count: \e[1;31m%d\e[0m\t", (failed_count));
 
     for (i = 0; i < failed_count; i++)
     {
-        log_out(LOG_CONSOLE, "\e[1;31m%s\e[0m\t", test_failed_list[i]);
+        log_out(LOG_FILE | LOG_CONSOLE, "\e[1;31m%s\e[0m\t", test_failed_list[i]);
     }
 
-    log_out(LOG_CONSOLE, "\n");
+    log_out(LOG_FILE|LOG_CONSOLE, "\n");
 
      if (odd_count_flag)
     {
-        log_out(LOG_CONSOLE, "not test count: 1\t\e[1;31m%s\e[0m\n", comlist[com_count]->d_name);
+        log_out(LOG_FILE|LOG_CONSOLE, "not test count: 1\t\e[1;31m%s\e[0m\n", comlist[com_count]->d_name);
     }
 
     /* 释放test_failed_list的所有空间 */
@@ -809,12 +818,13 @@ static void free_list(int list_len, char **list)
 
 /***
  * @brief 统一log输出管理
- * @param log_type [unsigned char]  从以下值中选择1-2个: LOG_FILE;LOG_CONSOLE;分别控制log输出到console和log文件
+ * @param log_type [unsigned short]  从以下值中选择1-2个: LOG_FILE;LOG_CONSOLE;分别控制log输出到console和log文件
  * @param *fmt [char]               字符串模板, 用法类似printf
  * @return [void]
  */
-static void log_out(unsigned char log_type, const char *fmt, ...)
+static void log_out(unsigned short log_type, const char *fmt, ...)
 {
+    int i;
     char temp_log[512] = {0};   /* 临时存放处理之后的字符串 */
     va_list args;               /* 参数列表 */
 
@@ -828,9 +838,24 @@ static void log_out(unsigned char log_type, const char *fmt, ...)
         printf("%s", temp_log);
     }
     /* 是否输出到log文件 */
-    if (LOG_FILE_ASSERT(log_type))
+    if (LOG_FILE_ASSERT(log_type) && (log_fd != -1))
     {
-
+        for (i = 0; i < strlen(temp_log); i++)
+        {
+            if (temp_log[i] == '\e')
+            {
+                while (temp_log[i] != 'm') 
+                {
+                    temp_log[i] = 2;
+                    i++;
+                }
+                if (temp_log[i] == 'm')
+                {
+                    temp_log[i] = 2;
+                }
+            }
+        }
+        write(log_fd, temp_log, strlen(temp_log));
     }
 }
 
@@ -895,4 +920,26 @@ static int try_get_result(int wait_ms)
 
     /* 获取失败 */
     return 0;
+}
+
+static void base_info_store(int argc, char **argv, int com_count, struct dirent **comlist)
+{
+    int i;
+
+    log_out(LOG_FILE, "command: ");
+    for (i = 0; i< argc; i++)
+    {
+        log_out(LOG_FILE, "%s ", argv[i]);
+    }
+    log_out(LOG_FILE, " \n");
+
+    log_out(LOG_FILE, "device count: %d\n", com_count);
+
+    log_out(LOG_FILE, "device list: ");
+
+    for (i = 0; i < com_count; i++)
+    {
+        log_out(LOG_FILE, "%s ", comlist[i]->d_name);
+    }
+    log_out(LOG_FILE, " \n\n");
 }
