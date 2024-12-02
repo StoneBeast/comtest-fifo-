@@ -3,7 +3,7 @@
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
  * @LastEditors  : Please set LastEditors
- * @LastEditTime : 2024-12-02 13:39:06
+ * @LastEditTime : 2024-12-02 13:53:07
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
@@ -160,11 +160,10 @@ int main(int argc, char **argv)
             return -1;
         }
 
-        option_ret = OPTION_EACHOTHER;
         com_count = 2;
     }
 
-    if ((option_ret == OPTION_EACHOTHER) && (com_count%2 == 1))
+    if ((option_ret == OPTION_EACHOTHER || option_ret == OPTION_DEBUGCOM) && (com_count%2 == 1))
     {
         odd_count_flag = 1;
         com_count --;
