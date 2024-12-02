@@ -3,15 +3,14 @@
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
  * @LastEditors  : Please set LastEditors
- * @LastEditTime : 2024-12-01 18:09:26
+ * @LastEditTime : 2024-12-02 13:39:06
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
 // TODO: 优化debug时选择同一个串口的调用流程
 // TODO: 考虑log文件命名规则，处理ANSI控制字符输出到文件
-// TODO: 从驱动来看，串口设备也没有提供非阻塞的读取方式，当前方法可能需要重置，可以采用再创建一个子线程，专门用于读取，并在次线程中计时的方式
-// TODO: 中断读取线程可以尝试使用pthread_cancel()
-// TODO: 在每轮测试来开始之前可以先尝试读取以下接收串口，防止缓冲区中有数据，但是如果在非阻塞状态下，流程可能会变得稍微复杂一些
+// TODO: 从程序健壮性的角度考虑，线程创建失败以及线程结束失败的情况
+// TODO: 参考其他程序处理传入参数的处理流程
 
 #define _GNU_SOURCE
 
@@ -85,10 +84,11 @@ static void diff_buf(char *buf1, char *buf2);
 static int check_com_args(char **com_args, struct dirent **comlist, int com_count);
 static void add_failed_list(char **list, int *count, char *failed_name);
 static void free_list(int list_len, char **list);
-static int try_read(int fd, char* buf);
 static void log_out(unsigned char log_type, const char *fmt, ...);
+static void* read_task(void *arg);
+static int try_get_result(int wait_ms);
 
-static sem_t sem_mw_tr, sem_mr_tw;
+static sem_t sem_mw_tr, sem_mr_tw, sem_rt;
 static char* com_prefix;
 
 /*** 
@@ -99,23 +99,24 @@ static char* com_prefix;
  */
 int main(int argc, char **argv)
 {
-    int pipe_fd[2];                 /* 用于与子线程通信的pipe的fd */
-    char test_buf[BUF_LEN] = {0};   /* 存放测试数据 */
-    char write_buf[BUF_LEN] = {0};  /* 用于接收子进程回报的数据 */
-    int i;                          /* 分别存放在主线程中与主线程、子线程有关的for i */
+    int pipe_fd[2];                     /* 用于与子线程通信的pipe的fd */
+    char test_buf[BUF_LEN] = {0};       /* 存放测试数据 */
+    char write_buf[BUF_LEN] = {0};      /* 用于接收子进程回报的数据 */
+    int i;                              /* 分别存放在主线程中与主线程、子线程有关的for i */
     int t_i;
-    char m_fifo_name[280] = {0};    /* 主线程、子线程打开的设备的名称以及fd */
+    char m_fifo_name[280] = {0};        /* 主线程、子线程打开的设备的名称以及fd */
     int m_fifo_fd;
     char t_fifo_name[280] = {0};
     int t_fifo_fd;
-    pthread_t thread;               /* 子线程的句柄 */
-    unsigned char arg_ret;          /* 接收check_args()返回的结果 */
-    char option_ret;                /* 选中的选项 */
-    struct dirent **comlist;        /* 存放所有符合条件的设备文件实例 */
-    int com_count;                  /* comlist的长度 */
-    int failed_count = 0;           /* 测试未通过的设备数量 */
-    char **test_failed_list;        /* 未通过测试的设备名称列表 */
-    int odd_count_flag = 0;         /* 对测，且设备个数为奇数标志 */
+    pthread_t thread;                   /* 子线程的句柄 */
+    unsigned char arg_ret;              /* 接收check_args()返回的结果 */
+    char option_ret;                    /* 选中的选项 */
+    struct dirent **comlist;            /* 存放所有符合条件的设备文件实例 */
+    int com_count;                      /* comlist的长度 */
+    int failed_count = 0;               /* 测试未通过的设备数量 */
+    char **test_failed_list;            /* 未通过测试的设备名称列表 */
+    int odd_count_flag = 0;             /* 对测，且设备个数为奇数标志 */
+    char pre_read_buf[BUF_LEN+5] = {0}; /* 存放预读取的数据 */
 
 #if DEBUG_INFO
         int m_temp_sem_val;
@@ -229,7 +230,6 @@ int main(int argc, char **argv)
         if (option_ret == OPTION_SELFTEST)
         {
             strcpy(t_fifo_name, m_fifo_name);
-            t_fifo_fd = m_fifo_fd;
         }
         else    /* option_ret == OPTION_EACHOTHER */
         {
@@ -246,7 +246,18 @@ int main(int argc, char **argv)
             /* 获取子线程需要监听的设备的文件名 */
             sprintf(t_fifo_name, "%s/%s", DEV_DIR, comlist[t_i]->d_name);
         }
-        
+
+        t_fifo_fd = open(t_fifo_name, O_RDWR);
+#if !IS_DEBUG //! IS_DEBUG==1
+        ioctl(t_fifo_fd, FIOSETOPTIONS, CS8);
+        ioctl(t_fifo_fd, FIOBAUDRATE, 115200);
+        ioctl(t_fifo_fd, SERIAL_MODE_SET, MODE_RS422);
+#endif //! IS_DEBUG==1
+        write(t_fifo_fd, "test", 5);
+        usleep(10 * 1000);
+        read(t_fifo_fd, pre_read_buf, BUF_LEN+5);
+        close(t_fifo_fd);
+
         /* 通过pipe将需要测试的设备fd发送给接收线程，并通过post信号量通知子线程 */
         write(pipe_fd[WRITE_FD], t_fifo_name, (strlen(t_fifo_name)+1));
 #if DEBUG_INFO
@@ -370,10 +381,10 @@ static void *thread_task(void *arg)
     int *t_pipe_fd;                 /* pipe fd */
     int t_fifo_fd;                  /* fifo(模拟设备)fd */
     char t_fifo_name[280] = {0};    /* fifo(模拟设备)设备文件名 */
-    fd_set t_rset;                  /* select参数，用于监听读事件 */
-    struct timeval t_wait_time;
-    int err;
-    char read_buf[BUF_LEN] = {0};
+    char read_buf[BUF_LEN] = {0};   /* 存放读取到的数据 */
+    pthread_t r_thread;             /* 读取线程句柄 */
+    void *temp_res;                 /* 线程cancel返回结果 */
+    int read_flag;                  /* 保存 try_get_result() 返回的结果 */
 
 #if DEBUG_INFO
     int t_temp_sem_val;
@@ -385,6 +396,8 @@ static void *thread_task(void *arg)
 
     /* 获取pipe fd */
     t_pipe_fd = arg;
+
+    sem_init(&sem_rt, 0, 0);
 
     while (1)
     {
@@ -405,7 +418,8 @@ static void *thread_task(void *arg)
 #if IS_DEBUG==1
             t_i++;
 #endif //! IS_DEBUG==1
-            t_fifo_fd = open(t_fifo_name, O_RDWR|O_NONBLOCK);
+            t_fifo_fd = open(t_fifo_name, O_RDWR);
+            // t_fifo_fd = open(t_fifo_name, O_RDWR|O_NONBLOCK);
             if (t_fifo_fd<=0)
             {
                 log_out(LOG_CONSOLE, "open %s error\n", t_fifo_name);
@@ -418,32 +432,58 @@ static void *thread_task(void *arg)
             ioctl(t_fifo_fd, SERIAL_MODE_SET, MODE_RS422);
 #endif //! IS_DEBUG==1
 
-            if (try_read(t_fifo_fd, read_buf) == 0)
+            pthread_create(&r_thread, NULL, read_task, &t_fifo_fd);
+            read_flag = try_get_result(100);
+            if (0 == read_flag)
             {
-                write(t_pipe_fd[WRITE_FD], "timeout", 8);
+                pthread_cancel(r_thread);
+            }
+            
+            pthread_join(r_thread, &temp_res);
+            if (0 == read_flag)
+            {
+                if (temp_res == PTHREAD_CANCELED)
+                {
 #if DEBUG_INFO
-                sem_getvalue(&sem_mr_tw, &t_temp_sem_val);
-                log_out(LOG_CONSOLE, "%d: t: send response: sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
+                    log_out(LOG_CONSOLE, "cancel thread success\n");
 #endif //! DEBUG_INFO
-                sem_post(&sem_mr_tw);
+
+                    write(t_pipe_fd[WRITE_FD], "timeout", 8);
+#if DEBUG_INFO
+                    sem_getvalue(&sem_mr_tw, &t_temp_sem_val);
+                    log_out(LOG_CONSOLE,
+                            "%d: t: send response: sem_mr_tw: %d\n", __LINE__,
+                            t_temp_sem_val);
+#endif //! DEBUG_INFO
+                    sem_post(&sem_mr_tw);
+                }
+                else
+                {
+                    log_out(LOG_CONSOLE, "cancel thread failed\n");
+                }
             }
             else
             {
+                strcpy(read_buf, temp_res);
+                free(temp_res);
 #if DEBUG_INFO
+                log_out(LOG_CONSOLE, "res: %s\n", read_buf);
                 sem_getvalue(&sem_mw_tr, &t_temp_sem_val);
-                log_out(LOG_CONSOLE, "%d: t: before read buf: sem_mw_tr: %d\n", __LINE__, t_temp_sem_val);
+                log_out(LOG_CONSOLE, "%d: t: before read buf: sem_mw_tr: %d\n",
+                        __LINE__, t_temp_sem_val);
 #endif //! DEBUG_INFO
 
 #if IS_DEBUG == 1
-                if (t_i == 4)
-                {
-                    read_buf[13] = 'M';
+                if (t_i == 4) {
+                  read_buf[13] = 'M';
                 }
 #endif //! IS_DEBUG==1
 
 #if DEBUG_INFO
                 sem_getvalue(&sem_mr_tw, &t_temp_sem_val);
-                log_out(LOG_CONSOLE, "%d: t: before send response: sem_mr_tw: %d\n", __LINE__, t_temp_sem_val);
+                log_out(LOG_CONSOLE,
+                        "%d: t: before send response: sem_mr_tw: %d\n",
+                        __LINE__, t_temp_sem_val);
 #endif //! DEBUG_INFO
                 /* 发送接收结果，并通知主线程 */
                 write(t_pipe_fd[WRITE_FD], read_buf, BUF_LEN);
@@ -768,53 +808,6 @@ static void free_list(int list_len, char **list)
     free(list);
 }
 
-/*** 
- * @brief 尝试读取fd
- * @param fd [int]      句柄    
- * @param buf [char*]   out: 存放读取的数据
- * @return [int]        返回读取到的数据的长度
- */
-static int try_read(int fd, char *buf)
-{
-    int read_len = 0;   /* 单次读取的数据长度 */
-    char temp_buf[255]; /* 临时存放读取的数据 */
-    int buf_len = 0;    /* 放入buf的累计长度 */
-    int times = 0;      /* 读取次数计数 */
-
-    /* 最大尝试读取次数为100次 */
-    while (times < 100)
-    {
-        /* 尝试读取，并保存结果 */
-        read_len = read(fd, temp_buf, 255);
-
-        /* 如果读取到数据，则退出循环，进行接下来的读取 */
-        if(read_len > 0)
-        {
-            break;
-        }
-        times ++;
-        /* 两次尝试读取间隙为2ms */
-        usleep(2 * 1000);
-    }
-
-    /* 超时未读到数据 */
-    if (read_len <= 0)
-    {
-        return 0;
-    }
-
-    /* 将数据存储到buf中 */
-    while (read_len > 0) 
-    {
-        memcpy((buf+buf_len), temp_buf, read_len);
-        buf_len += read_len;
-        buf[buf_len] = 0;
-        read_len = read(fd, temp_buf, 255);
-    }
-
-    return buf_len;
-}
-
 /***
  * @brief 统一log输出管理
  * @param log_type [unsigned char]  从以下值中选择1-2个: LOG_FILE;LOG_CONSOLE;分别控制log输出到console和log文件
@@ -840,4 +833,67 @@ static void log_out(unsigned char log_type, const char *fmt, ...)
     {
 
     }
+}
+
+/*** 
+ * @brief 实际执行读取行为的线程函数
+ * @param arg [void*]   线程函数参数，这里用来传输需要读取的设备的fd
+ * @return [void*]      用来返回读取到的设备或是线程退出结果
+ */
+static void *read_task(void *arg)
+{
+    int r_fd;           /* 读取设备的fd */
+    char *temp_buf;     /* 存放读取数据 */
+    int read_len = 0;   /* 读取数据的长度 */
+
+    /* 获取fd */
+    r_fd = (*(int *)arg);
+    /* 申请空间，需要在thread_task()中释放 */
+    temp_buf = (char*)malloc((sizeof(char)*BUF_LEN) + 1);
+    memset(temp_buf, 0, (sizeof(char) * BUF_LEN) + 1);
+
+    /* 尝试读取数据 */
+    read_len = read(r_fd, temp_buf, BUF_LEN+1);
+    if(read_len < BUF_LEN-1) /* 由于读取速度相较于收发速度快很多，有可能会出现刚接收一部分就返回，导致数据不完整的可能 */
+    {
+        /* 休眠50ms，保证数据完全接收后，再次读取 */
+        usleep(50*1000);
+        read(r_fd, temp_buf+read_len, BUF_LEN-read_len);
+    }
+    /* 给task thread发信号 */
+    sem_post(&sem_rt);
+
+    /* 返回接收数据 */
+    return temp_buf;
+}
+
+/*** 
+ * @brief 尝试获取读取结果
+ * @param wait_ms [int] 接收最大时长(ms)
+ * @return [int]        返回结果: 0:失败 1: 成功
+ */
+static int try_get_result(int wait_ms)
+{
+    int try_times = 0;  /* 尝试获取结果的次数 */
+    while (try_times<wait_ms) 
+    {
+        /* 尝试获取信号量 */
+        if (0 == sem_trywait(&sem_rt))
+        {
+            break;
+        }
+        /* 每次尝试之间间隔1ms */
+        usleep(1000*1);
+        try_times++;
+    }
+
+    /* 尝试次数小于设定最大次数 */
+    if (try_times < wait_ms)
+    {
+        /* 返回成功 */
+        return 1;
+    }
+
+    /* 获取失败 */
+    return 0;
 }
