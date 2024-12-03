@@ -2,7 +2,7 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-03 09:52:12
+ * @LastEditTime : 2024-12-03 18:57:40
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
@@ -361,9 +361,6 @@ int main(int argc, char **argv)
     /* 等待子线程退出 */
     pthread_join(thread, NULL);
 
-    /* 释放namelist */
-    free(comlist);
-
     log_out(LOG_FILE|LOG_CONSOLE, "test passed count: \e[1;32m%d\e[0m\n", (com_count - failed_count));
     log_out(LOG_FILE|LOG_CONSOLE, "test failed count: \e[1;31m%d\e[0m\t", (failed_count));
 
@@ -378,6 +375,9 @@ int main(int argc, char **argv)
     {
         log_out(LOG_FILE|LOG_CONSOLE, "not test count: 1\t\e[1;31m%s%s\e[0m\n", OUT_NAME(comlist[com_count]->d_name));
     }
+
+    /* 释放namelist */
+    free(comlist);
 
     /* 释放test_failed_list的所有空间 */
     free_list(failed_count, test_failed_list);
