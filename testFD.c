@@ -2,7 +2,7 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-02 23:34:19
+ * @LastEditTime : 2024-12-03 09:52:12
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
@@ -11,7 +11,6 @@
 // TODO: 从程序健壮性的角度考虑，线程创建失败以及线程结束失败的情况
 // TODO: 参考其他程序处理传入参数的处理流程
 // TODO: 可以考虑添加进度条
-// BUG:  修复打印测试数据时，最后一个字符会出现异常字符
 // TODO: 可以将出现错误的打印恢复出来
 // TODO: 修改log文件存储逻辑
 // TODO: 考虑添加-l和-h
@@ -31,10 +30,10 @@
 #include <stdarg.h>
 
 #define IS_DEBUG    1   /* 测试模式标志 */
-#define TEST_SELF   1   /* 自测功能测试标志 */
+#define TEST_SELF   0   /* 自测功能测试标志 */
 #define DEBUG_INFO  0   /* debug输出标志 */
 
-#define BUF_LEN     126-33+1+1  /* buffer长度 */
+#define BUF_LEN     126-33+1  /* buffer长度 */
 #define READ_FD     0           /* pipe read/write fd */
 #define WRITE_FD    1
 #define END_SIG     "END"       /* 测试结束标志 */
