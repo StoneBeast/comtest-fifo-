@@ -2,11 +2,10 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-04 13:33:54
+ * @LastEditTime : 2024-12-04 14:48:33
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
-// TODO: 优化debug时选择同一个串口的调用流程
 // TODO: 考虑log文件命名规则，处理ANSI控制字符输出到文件
 // TODO: 从程序健壮性的角度考虑，线程创建失败以及线程结束失败的情况
 // TODO: 可以考虑添加进度条
@@ -77,7 +76,7 @@ static unsigned char check_args(int argc, char **argv);
 static void display_connection(int com_count, struct dirent **com_name);
 static int selector(const struct dirent *dir_ent);
 static void diff_buf(char *buf1, char *buf2);
-static int check_com_args(char **com_args, struct dirent **comlist, int com_count);
+static int check_com_args(char **com_args, int com_arg_count, struct dirent **comlist, int com_count);
 static void add_failed_list(char **list, int *count, char *failed_name);
 static void free_list(int list_len, char **list);
 static void log_out(unsigned short log_type, const char *fmt, ...);
@@ -194,13 +193,13 @@ int main(int argc, char **argv)
     /* 如果当前是测试选项 */
     if (option_ret == OPTION_DEBUGCOM)
     {
-        if (check_com_args(&(g_cmd.main_args[1]), comlist, com_count) == 0)
+        if (check_com_args(&(g_cmd.main_args[1]), g_cmd.main_arg_count-1, comlist, com_count) == 0)
         {
             log_out(LOG_CONSOLE, "error: invalid com device name\n");
             return -1;
         }
 
-        com_count = 2;
+        com_count = (g_cmd.main_arg_count-1);
     }
 
     if ((option_ret == OPTION_EACHOTHER || option_ret == OPTION_SELFTEST) && g_cmd.sub_option == OPTION_SUB_EXCLUDE)
@@ -256,7 +255,7 @@ int main(int argc, char **argv)
 
         /* 打开设备 */
         // TODO: 由于用于模拟设备的fifo的限制，只能都以读写模式打开，实际的环境中可以测试以只写模式打开
-        if (option_ret == OPTION_SELFTEST)
+        if (option_ret == OPTION_SELFTEST || (option_ret == OPTION_DEBUGCOM && com_count == 1))
         {
             m_fifo_fd = open(m_fifo_name, O_RDWR);
         }
@@ -278,7 +277,7 @@ int main(int argc, char **argv)
 #endif //! IS_DEBUG==1
 
         /* 如果当前是自测，则子线程需要监听的设备fd以及设备文件名均与主线程相同 */
-        if (option_ret == OPTION_SELFTEST)
+        if (option_ret == OPTION_SELFTEST || (option_ret == OPTION_DEBUGCOM && com_count == 1))
         {
             strcpy(t_fifo_name, m_fifo_name);
         }
@@ -622,7 +621,6 @@ static unsigned char check_args(int argc, char **argv)
                 strcpy(g_cmd.main_args[0], optarg);
                 if (argc == 3)  /* 没有指定其他选项 */
                 {
-                    log_out(LOG_CONSOLE, "here\n");
                 }
                 else if (argc > 4)  /* 有可能使用了 -E 选项 */
                 {
@@ -663,10 +661,10 @@ static unsigned char check_args(int argc, char **argv)
                 }
                 break;
             case OPTION_DEBUGCOM:
-                if (argc == 5 && (strcmp(argv[1], "-d") == 0))
+                if ((argc == 5 || argc == 4) && (strcmp(argv[1], "-d") == 0))
                 {
                     g_cmd.main_option = opt;
-                    g_cmd.main_arg_count = 3;
+                    g_cmd.main_arg_count = argc-2;
                     g_cmd.main_args = malloc(sizeof(char*)* g_cmd.main_arg_count);
                     arg_index = 0;
                     for (i = optind-1; i < argc; i++)
@@ -731,7 +729,7 @@ static unsigned char check_args(int argc, char **argv)
                 "\t\t-c: -c <com-prefix> -- display connections\n"
                 "\t\t-e: -e <com-prefix> [-E [device1] ... ] -- one transmit one receive [exclude device1 ...]\n"
                 "\t\t-s: -s <com-prefix> [-E [device1] ... ] -- self transmit and receive [exclude device1 ...]\n"
-                "\t\t-d: -d <com-prefix> <com1> <com2> -- debug com1 and com2\n"
+                "\t\t-d: -d <com-prefix> <com1> [com2] -- debug com1 and [com2]\n"
                 "\tcom-prefix: \n"
                 "\t\tcom device name prefix\n",
                 argv[0]);
@@ -880,49 +878,58 @@ static void diff_buf(char *buf1, char *buf2)
 /*** 
  * @brief 检查指定的两个参数串口是否存在
  * @param com_args [char**]             传入的com参数的列表
+ * @param com_arg_count [int]           传入的com参数的列表长度
  * @param comlist [struct dirent***]    out: 指向系统中所有待测的设备文件列表的指针,参数合法时会返回只含有参数的列表指针
  * @param s_com_count [int]             comlist的长度
  * @return [int]:                       1: 参数合法; 0: 参数非法
  */
-static int check_com_args(char **com_args, struct dirent **s_comlist, int s_com_count)
+static int check_com_args(char **com_args, int com_arg_count, struct dirent **s_comlist, int s_com_count)
 {
     int check_flag = 0;         /* 检查通过标志计数 */
-    int i, com1_inx, com2_inx;  /* com1_inx,com2_inx: 记录两个参数在comlist中匹配的索引 */
+    int i, com1_inx = -1, com2_inx = -1;  /* com1_inx,com2_inx: 记录两个参数在comlist中匹配的索引 */
     struct dirent temp1;        /* 临时变量 */
     struct dirent temp2;
 
     /* 循环比较列表中的成员是否包含传入的参数 */
     for (i = 0; i < s_com_count; i++)
     {
-        if (strcmp(com_args[0], (s_comlist)[i]->d_name) == 0) 
+        if ((strcmp(com_args[0], (s_comlist)[i]->d_name) == 0) && (com1_inx == -1)) 
         {
             /* 记录索引，递增标志计数 */
             com1_inx = i;
             check_flag++;
         }
         /* 允许两个测试串口选择同一个 */
-        // if (strcmp(com_args[1], (s_comlist)[i]->d_name) == 0)
-        else if (strcmp(com_args[1], (s_comlist)[i]->d_name) == 0)
+        if (com_arg_count == 2)
         {
-            com2_inx = i;
-            check_flag++;
+            if ((strcmp(com_args[1], (s_comlist)[i]->d_name) == 0) && (com2_inx == -1)) 
+            {
+                com2_inx = i;
+                check_flag++;
+            }
         }
 
-        if (check_flag == 2)
+        if (check_flag == com_arg_count)
         {
             break;
         }
     }
 
-    if (check_flag == 2)
+    if (check_flag == com_arg_count)
     {
         /* 两个串口都存在 */
         /* 将两个设备文件信息保存出来 */
         memcpy(&temp1, (s_comlist)[com1_inx], sizeof(struct dirent));
-        memcpy(&temp2, (s_comlist)[com2_inx], sizeof(struct dirent));
+        if (com_arg_count == 2)
+        {
+            memcpy(&temp2, (s_comlist)[com2_inx], sizeof(struct dirent));
+        }
 
         strcpy((*(s_comlist[0])).d_name, temp1.d_name);
-        strcpy((*(s_comlist[1])).d_name, temp2.d_name);
+        if (com_arg_count == 2)
+        {
+            strcpy((*(s_comlist[1])).d_name, temp2.d_name);
+        }
 
         return 1;
     }
