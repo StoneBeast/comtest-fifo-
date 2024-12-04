@@ -2,7 +2,7 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-04 14:48:33
+ * @LastEditTime : 2024-12-04 16:09:31
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
@@ -145,7 +145,7 @@ int main(int argc, char **argv)
     int failed_count = 0;               /* 测试未通过的设备数量 */
     char **test_failed_list;            /* 未通过测试的设备名称列表 */
     int odd_count_flag = 0;             /* 对测，且设备个数为奇数标志 */
-    char pre_read_buf[BUF_LEN+5] = {0}; /* 存放预读取的数据 */
+    char pre_read_buf[512] = {0}; /* 存放预读取的数据 */
 
 #if DEBUG_INFO
         int m_temp_sem_val;
@@ -303,9 +303,10 @@ int main(int argc, char **argv)
         ioctl(t_fifo_fd, FIOBAUDRATE, 115200);
         ioctl(t_fifo_fd, SERIAL_MODE_SET, MODE_RS422);
 #endif //! IS_DEBUG==1
+        /* 开始测试之前，先向需要先读取一次，防止设备中有未被读出的数据；读取之前先写入是为了防止没有数据时被程序被阻塞 */
         write(t_fifo_fd, "test", 5);
         usleep(10 * 1000);
-        read(t_fifo_fd, pre_read_buf, BUF_LEN+5);
+        read(t_fifo_fd, pre_read_buf, 512);
         close(t_fifo_fd);
 
         /* 通过pipe将需要测试的设备fd发送给接收线程，并通过post信号量通知子线程 */
