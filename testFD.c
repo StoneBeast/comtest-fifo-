@@ -2,18 +2,16 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-03 18:48:05
+ * @LastEditTime : 2024-12-04 13:33:54
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
 // TODO: 优化debug时选择同一个串口的调用流程
 // TODO: 考虑log文件命名规则，处理ANSI控制字符输出到文件
 // TODO: 从程序健壮性的角度考虑，线程创建失败以及线程结束失败的情况
-// TODO: 参考其他程序处理传入参数的处理流程
 // TODO: 可以考虑添加进度条
 // TODO: 可以将出现错误的打印恢复出来
 // TODO: 修改log文件存储逻辑
-// TODO: 考虑添加-l和-h
 
 #define _GNU_SOURCE
 
@@ -31,24 +29,14 @@
 #include <getopt.h>
 
 #define IS_DEBUG    1   /* 测试模式标志 */
-#define TEST_SELF   0   /* 自测功能测试标志 */
+#define TEST_SELF   1   /* 自测功能测试标志 */
 #define DEBUG_INFO  0   /* debug输出标志 */
 
-#define BUF_LEN     126-33+1  /* buffer长度 */
+#define BUF_LEN     126-33+1    /* buffer长度 */
 #define READ_FD     0           /* pipe read/write fd */
 #define WRITE_FD    1
 #define END_SIG     "END"       /* 测试结束标志 */
 
-#define OPTIONS                 "ecsd"                                  /* 合法的options，用于判断 */
-#define OPT_PREFIX_RET(opt,pre) ((unsigned char)((opt<<4)|(pre<<0)))    /* 将options和prefix的位置信息放入一个8bit的数据中 */
-#define GET_OPT(ret)            ((unsigned char)((ret>>4)&(0x0f)))      /* 获取options的位置信息 */
-#define GET_PREFIX(ret)         ((unsigned char)((ret)&(0x0f)))         /* 获取prefix的位置信息 */
-#define OPTION_CONNECTION       'c'                                     /* options */
-#define OPTION_SELFTEST         's'
-#define OPTION_EACHOTHER        'e'
-#define OPTION_DEBUGCOM         'd'
-#define OPTION_LIST             'l'
-#define OPTION_SUB_EXCLUDE      'E'
 #define LOG_CONSOLE             ((unsigned short)(0x00FF))              /* log输出类型: 终端/log file输出 */
 #define LOG_FILE                ((unsigned short)(0xFF00))
 #define LOG_CONSOLE_ASSERT(t)   ((t & LOG_CONSOLE) == LOG_CONSOLE)      /* 判断log输出类型 */
@@ -84,7 +72,6 @@ static void heavy_work(void);
 
 #endif //! IS_DEBUG==1
 
-
 static void* thread_task(void *arg);
 static unsigned char check_args(int argc, char **argv);
 static void display_connection(int com_count, struct dirent **com_name);
@@ -104,6 +91,14 @@ static sem_t sem_mw_tr, sem_mr_tw, sem_rt;  /* 主线程与子线程之间用于
 static char* com_prefix;                    /* 设备前缀 */
 static int log_fd;                          /* log文件fd */
 
+#define OPTION_CONNECTION   'c' /* options */
+#define OPTION_SELFTEST     's'
+#define OPTION_EACHOTHER    'e'
+#define OPTION_DEBUGCOM     'd'
+#define OPTION_LIST         'l'
+#define OPTION_HELP         'h'
+#define OPTION_SUB_EXCLUDE  'E'
+
 static char* shortopts = "hl:c:s:e:d:E";
 static char* main_opts = "hlcsed";
 static char* sub_opts = "E";
@@ -117,7 +112,7 @@ typedef struct {
     char ** sub_args;
 } cmd_t;
 
-static cmd_t cmd = {
+static cmd_t g_cmd = {
     .main_option = 0,
     .main_arg_count = 0,
     .main_args = NULL,
@@ -164,23 +159,16 @@ int main(int argc, char **argv)
 
     /* 检查参数合法性，并获取com_prefix */
     arg_ret = check_args(argc, argv);
-    if (arg_ret == 'h')
+    if (arg_ret == OPTION_HELP)
     {
         return 0;
     }
 
-#if 0
-    if (arg_ret == 0)
-    {
-        return -1;
-    }
-#endif
-
     /* 获取设备文件名前缀以及选项 */
     else
     {
-        com_prefix = cmd.main_args[0];
-        option_ret = cmd.main_option;
+        com_prefix = g_cmd.main_args[0];
+        option_ret = g_cmd.main_option;
     }
 
     /* 获取所有待测设备，并按照名称排序 */
@@ -206,7 +194,7 @@ int main(int argc, char **argv)
     /* 如果当前是测试选项 */
     if (option_ret == OPTION_DEBUGCOM)
     {
-        if (check_com_args(&(cmd.main_args[1]), comlist, com_count) == 0)
+        if (check_com_args(&(g_cmd.main_args[1]), comlist, com_count) == 0)
         {
             log_out(LOG_CONSOLE, "error: invalid com device name\n");
             return -1;
@@ -215,9 +203,9 @@ int main(int argc, char **argv)
         com_count = 2;
     }
 
-    if ((option_ret == OPTION_EACHOTHER || option_ret == OPTION_SELFTEST) && cmd.sub_option == OPTION_SUB_EXCLUDE)
+    if ((option_ret == OPTION_EACHOTHER || option_ret == OPTION_SELFTEST) && g_cmd.sub_option == OPTION_SUB_EXCLUDE)
     {
-        com_count = exclude_com(cmd.sub_args, cmd.sub_arg_count, comlist, com_count);
+        com_count = exclude_com(g_cmd.sub_args, g_cmd.sub_arg_count, comlist, com_count);
     }
 
     if (option_ret == OPTION_EACHOTHER && (com_count%2 == 1))
@@ -428,7 +416,7 @@ int main(int argc, char **argv)
     /* 释放namelist */
     free(comlist);
 
-    free_cmd(&cmd);
+    free_cmd(&g_cmd);
 
     /* 释放test_failed_list的所有空间 */
     free_list(failed_count, test_failed_list);
@@ -585,85 +573,85 @@ static void heavy_work(void)
 #endif //! IS_DEBUG==1
 
 /*** 
- * @brief   判断参数合法性，并返回options的索引；强制要求前两个参数一个是选项，一个是前缀
+ * @brief 判断参数合法性，根据结果填充全局变量cmd结构体，并返回其中的main_option成员
  * @param argc [int]        参数个数
  * @param argv [char**]     参数数组
- * @return [unsigned char]  0: 参数非法 [0:3]:prefix的位置, [4:7]:option的位置
+ * @return [unsigned char]  cmd的main_option成员
  */
 static unsigned char check_args(int argc, char **argv)
 {
-    unsigned char check_flag = 1;   /* 校验通过标志计数 */
     int opt = 0;
     int arg_index = 0;
     int i;
 
+    /* 没有参数 */
     if ((opt = getopt(argc, argv, shortopts)) == -1)
     {
-        cmd.main_option = 'h';
+        g_cmd.main_option = OPTION_HELP;
     }
     else
     {
         switch (opt)
         {
-            case 'h':   /* help no argument */
-                cmd.main_option = 'h';
+            case OPTION_HELP:   /* help no argument */
+                g_cmd.main_option = OPTION_HELP;
                 log_out(LOG_CONSOLE, "Too many arguments\n");
                 break;
-            case 'l':
-            case 'c':
+            case OPTION_LIST:
+            case OPTION_CONNECTION:
                 if (argc == 3)
                 {
-                    cmd.main_option = opt;
-                    cmd.main_arg_count = 1;
-                    cmd.main_args = malloc(sizeof(char*) * cmd.main_arg_count);
-                    cmd.main_args[0] = malloc(strlen(optarg)+1);
-                    strcpy(cmd.main_args[0], optarg);
+                    g_cmd.main_option = opt;
+                    g_cmd.main_arg_count = 1;
+                    g_cmd.main_args = malloc(sizeof(char*) * g_cmd.main_arg_count);
+                    g_cmd.main_args[0] = malloc(strlen(optarg)+1);
+                    strcpy(g_cmd.main_args[0], optarg);
                 }
                 else
                 {
-                    cmd.main_option = 'h';
+                    g_cmd.main_option = OPTION_HELP;
                     log_out(LOG_CONSOLE, "Too many arguments\n");
                 }
                 break;
-            case 's':
-            case 'e':
-                cmd.main_option = opt;
-                cmd.main_arg_count = 1;
-                cmd.main_args = malloc(sizeof(char*)* cmd.main_arg_count);
-                cmd.main_args[0] = malloc(strlen(optarg)+1);
-                strcpy(cmd.main_args[0], optarg);
+            case OPTION_SELFTEST:
+            case OPTION_EACHOTHER:
+                g_cmd.main_option = opt;
+                g_cmd.main_arg_count = 1;
+                g_cmd.main_args = malloc(sizeof(char*)* g_cmd.main_arg_count);
+                g_cmd.main_args[0] = malloc(strlen(optarg)+1);
+                strcpy(g_cmd.main_args[0], optarg);
                 if (argc == 3)  /* 没有指定其他选项 */
                 {
                     log_out(LOG_CONSOLE, "here\n");
                 }
                 else if (argc > 4)  /* 有可能使用了 -E 选项 */
                 {
-                    if (cmd.sub_option == 0)
+                    if (g_cmd.sub_option == 0)
                     {
                         opt = getopt(argc, argv, "E");
-                        if (opt == 'E')
+                        if (opt == OPTION_SUB_EXCLUDE)
                         {
-                            cmd.sub_option = 'E';
-                            cmd.sub_arg_count = argc-4;
-                            cmd.sub_args = malloc(sizeof(char*)*cmd.sub_arg_count);
+                            g_cmd.sub_option = OPTION_SUB_EXCLUDE;
+                            g_cmd.sub_arg_count = argc-4;
+                            g_cmd.sub_args = malloc(sizeof(char*)*g_cmd.sub_arg_count);
                             arg_index = 0;
                             for (i = optind; i < argc; i++)
                             {
-                                cmd.sub_args[arg_index] = malloc(strlen(argv[i])+1);
-                                strcpy(cmd.sub_args[arg_index], argv[i]);
+                                g_cmd.sub_args[arg_index] = malloc(strlen(argv[i])+1);
+                                strcpy(g_cmd.sub_args[arg_index], argv[i]);
                                 arg_index++;
                             }
                         }
                         else
                         {
-                            cmd.main_option = 'h';
+                            g_cmd.main_option = OPTION_HELP;
                             log_out(LOG_CONSOLE, "Too many arguments\n");
                         }
                     }
                 }
                 else
                 {
-                    cmd.main_option = 'h';
+                    g_cmd.main_option = OPTION_HELP;
                     if (strcmp(argv[3], "-E") == 0)
                     {
                         log_out(LOG_CONSOLE, "No exclude arguments\n");
@@ -674,66 +662,66 @@ static unsigned char check_args(int argc, char **argv)
                     }
                 }
                 break;
-            case 'd':
+            case OPTION_DEBUGCOM:
                 if (argc == 5 && (strcmp(argv[1], "-d") == 0))
                 {
-                    cmd.main_option = opt;
-                    cmd.main_arg_count = 3;
-                    cmd.main_args = malloc(sizeof(char*)* cmd.main_arg_count);
+                    g_cmd.main_option = opt;
+                    g_cmd.main_arg_count = 3;
+                    g_cmd.main_args = malloc(sizeof(char*)* g_cmd.main_arg_count);
                     arg_index = 0;
                     for (i = optind-1; i < argc; i++)
                     {
-                        cmd.main_args[arg_index] = malloc(strlen(argv[i] +1));
-                        strcpy(cmd.main_args[arg_index], argv[i]);
+                        g_cmd.main_args[arg_index] = malloc(strlen(argv[i] +1));
+                        strcpy(g_cmd.main_args[arg_index], argv[i]);
                         arg_index++;
                     }
                 }
                 else 
                 {
-                    cmd.main_option = 'h';
+                    g_cmd.main_option = OPTION_HELP;
                     log_out(LOG_CONSOLE, "Too many or less arguments\n");
                 }
                 break;
-            case 'E':
+            case OPTION_SUB_EXCLUDE:
                 if ((opt = getopt(argc, argv, "s:e:")) != -1)
                 {
                     if (optind == argc)
                     {
-                        cmd.main_option = opt;
-                        cmd.main_arg_count = 1;
-                        cmd.main_args = malloc(sizeof(char*)* cmd.main_arg_count);
-                        cmd.main_args[0] = malloc(strlen(optarg)+1);
-                        strcpy(cmd.main_args[0], optarg);
+                        g_cmd.main_option = opt;
+                        g_cmd.main_arg_count = 1;
+                        g_cmd.main_args = malloc(sizeof(char*)* g_cmd.main_arg_count);
+                        g_cmd.main_args[0] = malloc(strlen(optarg)+1);
+                        strcpy(g_cmd.main_args[0], optarg);
                     }
                 }
-                if (strchr("se", cmd.main_option) != NULL)
+                if (strchr("se", g_cmd.main_option) != NULL)
                 {
-                    cmd.sub_option = 'E';
-                    cmd.sub_arg_count = argc-2-1-1;
-                    cmd.sub_args = malloc(sizeof(char*)*cmd.sub_arg_count);
+                    g_cmd.sub_option = OPTION_SUB_EXCLUDE;
+                    g_cmd.sub_arg_count = argc-2-1-1;
+                    g_cmd.sub_args = malloc(sizeof(char*)*g_cmd.sub_arg_count);
                     i = 0;
                     for (arg_index = 2; arg_index < argc-2; arg_index++)
                     {
-                        cmd.sub_args[i] = malloc(strlen(argv[arg_index])+1);
-                        strcpy(cmd.sub_args[i], argv[arg_index]);
+                        g_cmd.sub_args[i] = malloc(strlen(argv[arg_index])+1);
+                        strcpy(g_cmd.sub_args[i], argv[arg_index]);
                         i++;
                     }
                 }
                 else
                 {
-                    cmd.main_option = 'h';
+                    g_cmd.main_option = OPTION_HELP;
                     log_out(LOG_CONSOLE, "Incalid option\n");
                 }
 
                 break;
             default:
-                cmd.main_option = 'h';
+                g_cmd.main_option = OPTION_HELP;
                 break;
         }
     }
 
 
-    if (cmd.main_option == 'h')
+    if (g_cmd.main_option == OPTION_HELP)
     {
         log_out(LOG_CONSOLE,
                 "usage: %s <options> [arguments]\n"
@@ -748,59 +736,7 @@ static unsigned char check_args(int argc, char **argv)
                 "\t\tcom device name prefix\n",
                 argv[0]);
     }
-#if 0
-    /* 校验参数个数以及参数格式 */
-    if (argc != 3 && argc != 5)
-    {
-        check_flag = 0;
-        log_out(LOG_CONSOLE, "\e[1;31mToo many or less args\e[0m\n");
-    }
-    else if ((argv[1])[0] != '-' && (argv[2])[0] != '-') 
-    {
-        check_flag = 0;
-        log_out(LOG_CONSOLE, "\e[1;31mNo options\e[0m\n");
-    }
-    else if ((argv[1])[0] == '-' && (argv[2])[0] == '-') 
-    {
-        check_flag = 0;
-        log_out(LOG_CONSOLE, "\e[1;31mNo com-prefix\e[0m\n");
-    }
-    else if ((argv[1])[0] == '-')   /* 获取选项参数以及前缀参数的位置 */
-    {
-        check_flag = OPT_PREFIX_RET(1, 2);
-    }
-    else
-    {
-        check_flag = OPT_PREFIX_RET(2, 1);
-    }
-
-    /* 校验选项参数是否合法 */
-    if(NULL == strchr(OPTIONS, (argv[GET_OPT(check_flag)])[1]))
-    {
-        log_out(LOG_CONSOLE, "\e[1;31mInvain options\e[0m\n");
-        check_flag = 0;
-    }
-
-    /* 检查某些特定组合 */
-    if (argc != 5 && ((argv[GET_OPT(check_flag)])[1] == OPTION_DEBUGCOM))
-    {
-        check_flag = 0;
-        log_out(LOG_CONSOLE, "\e[1;31m-d Must have 2 COM args\e[0m\n");
-    }
-
-    if (check_flag == 0)
-    {
-        log_out(LOG_CONSOLE, "usage: %s <options> <com-prefix> [<com1> <com2>]\n"
-                            "\toptions:\n"
-                                "\t\t-e: one transmit one receive\n"
-                                "\t\t-s: self transmit and receive\n"
-                                "\t\t-c: display connections\n"
-                                "\t\t-d: -d <com-prefix> <com1> <com2> :debug com1 and com2\n"
-                            "\tcom-prefix: \n"
-                                "\t\tcom device name prefix\n", argv[0]);
-    }
-#endif
-    return cmd.main_option;
+    return g_cmd.main_option;
 }
 
 /*** 
@@ -835,7 +771,8 @@ static void display_connection(int s_com_count, struct dirent **com_name)
  */
 static int selector(const struct dirent *dir_ent)
 {
-    if (strncmp(com_prefix, dir_ent->d_name, strlen(com_prefix)) == 0)
+    if ((strncmp(com_prefix, dir_ent->d_name, strlen(com_prefix)) == 0) 
+        && (strlen(com_prefix) < strlen(dir_ent->d_name)))
     {
         return 1;
     }
@@ -1184,29 +1121,32 @@ static void base_info_store(int argc, char **argv, int com_count, struct dirent 
  */
 static int exclude_com(char **com_args, int com_arg_count, struct dirent **comlist, int com_count)
 {
-    int p = 0;
+    int p = 0;              /* 记录被最后填充进comlist的位置 */
     int list_i = 0;
     int arg_i = 0;
-    int res_count = 0;
+    int res_count = 0;      /* 剩余的设备数量 */
     int ex_flag = 0;
     struct dirent temp;
 
+    /* 遍历comlist */
     for (list_i = 0; list_i < com_count; list_i++)
     {
         ex_flag = 0;
+        /* 遍历排除列表 */
         for (arg_i = 0; arg_i < com_arg_count; arg_i++)
         {
+            /* 发现在排除列表上的，退出循环，置位排除位 */
             if (strcmp(com_args[arg_i], comlist[list_i]->d_name) == 0)
             {
                 ex_flag = 1;
                 break;
             }
         }
+        /* 未被排除的成员重新添加进列表 */
         if (ex_flag == 0)
         {
             memcpy(&temp, comlist[list_i], sizeof(struct dirent));
             strcpy(comlist[p]->d_name, temp.d_name);
-            // memcpy(comlist[p], &temp, sizeof(struct dirent));
             p++;
             res_count++;
         }
