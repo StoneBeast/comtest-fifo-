@@ -2,14 +2,15 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-06 11:21:59
- * @Description  : 使用fifo模拟串口，测试程序
+ * @LastEditTime : 2024-12-06 13:51:17
+ * @Description  : linux环境下串口自动测试程序
  */
 
 // TODO: 从程序健壮性的角度考虑，线程创建失败以及线程结束失败的情况
 // TODO: 可以考虑添加进度条
 // TODO: 可以将出现错误的打印恢复出来
 // TODO: 修改log文件存储逻辑
+// BUG:  -N 选项不能和 -E 和 -d一起使用，-d -N会报错；-E -N会把-N当作-E的参数；
 
 #define _GNU_SOURCE
 
@@ -294,15 +295,7 @@ get_time_named:
         memset(write_buf, 0, BUF_LEN);
 
         /* 打开设备 */
-        // TODO: 由于用于模拟设备的fifo的限制，只能都以读写模式打开，实际的环境中可以测试以只写模式打开
-        if (option_ret == OPTION_SELFTEST || (option_ret == OPTION_DEBUGCOM && com_count == 1))
-        {
-            m_fifo_fd = open(m_fifo_name, O_RDWR);
-        }
-        else
-        {
-            m_fifo_fd = open(m_fifo_name, O_RDWR);
-        }
+        m_fifo_fd = open(m_fifo_name, O_RDWR);
 
         if (m_fifo_fd<=0)
         {
