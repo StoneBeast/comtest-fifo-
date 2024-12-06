@@ -2,16 +2,14 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-04 16:09:31
+ * @LastEditTime : 2024-12-06 11:21:59
  * @Description  : 使用fifo模拟串口，测试程序
  */
 
-// TODO: 考虑log文件命名规则，处理ANSI控制字符输出到文件
 // TODO: 从程序健壮性的角度考虑，线程创建失败以及线程结束失败的情况
 // TODO: 可以考虑添加进度条
 // TODO: 可以将出现错误的打印恢复出来
 // TODO: 修改log文件存储逻辑
-// TODO: 考虑新增-n::命令, 可以配合测试一起使用，每次使用-n都会创建一个新的log文件，若没有指定命名则使用当前时间戳命名
 
 #define _GNU_SOURCE
 
@@ -27,6 +25,9 @@
 #include <sys/ioctl.h>
 #include <stdarg.h>
 #include <getopt.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #define IS_DEBUG    1   /* 测试模式标志 */
 #define TEST_SELF   1   /* 自测功能测试标志 */
@@ -83,9 +84,10 @@ static void free_list(int list_len, char **list);
 static void log_out(unsigned short log_type, const char *fmt, ...);
 static void* read_task(void *arg);
 static int try_get_result(int wait_ms);
-static void base_info_store(int argc, char **argv, int com_count, struct dirent **comlist);
+static void base_info_store(int argc, char **argv, int com_count, struct dirent **comlist, struct tm time_l);
 static int exclude_com(char **com_args,  int com_arg_count, struct dirent **comlist, int com_count);
 static void free_cmd(void * cmd);
+static int get_latest_log(char *log_name);
 
 static sem_t sem_mw_tr, sem_mr_tw, sem_rt;  /* 主线程与子线程之间用于线程同步，子线程与读取线程之间用于轮询读取 */
 static char* com_prefix;                    /* 设备前缀 */
@@ -98,10 +100,11 @@ static int log_fd;                          /* log文件fd */
 #define OPTION_LIST         'l'
 #define OPTION_HELP         'h'
 #define OPTION_SUB_EXCLUDE  'E'
+#define OPTION_SUB_NEWLOG   'N'
 
-static char* shortopts = "hl:c:s:e:d:E";
+static char* shortopts = "hl:c:s:e:d:EN::";
 static char* main_opts = "hlcsed";
-static char* sub_opts = "E";
+static char* sub_opts = "EN::";
 
 typedef struct {
     char main_option;
@@ -146,7 +149,12 @@ int main(int argc, char **argv)
     int failed_count = 0;               /* 测试未通过的设备数量 */
     char **test_failed_list;            /* 未通过测试的设备名称列表 */
     int odd_count_flag = 0;             /* 对测，且设备个数为奇数标志 */
-    char pre_read_buf[512] = {0}; /* 存放预读取的数据 */
+    char pre_read_buf[512] = {0};       /* 存放预读取的数据 */
+    time_t log_time;                    /* 执行测试的时间戳 */
+    struct tm time_l;                   /* 存储时间戳中的各个元素 */
+    char log_name[128] = {0};           /* log文件名 */
+    int log_oflag = 0;                  /* 打开/创建log文件时的flag */
+
 
 #if DEBUG_INFO
         int m_temp_sem_val;
@@ -214,12 +222,43 @@ int main(int argc, char **argv)
         com_count --;
     }
 
-    log_fd = open("./log.txt", O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    /* 指定了存储在新的log文件中 */
+    if (g_cmd.sub_option == OPTION_SUB_NEWLOG)
+    {
+        if (g_cmd.sub_arg_count)    /* 是否指定的新log文件的名称 */
+        {
+            sprintf(log_name, "./%s.log", g_cmd.sub_args[0]);
+        }
+        else
+        {
+get_time_named:
+            /* 获取并格式化时间 */
+            time(&log_time);
+            localtime_r(&log_time, &time_l);
+            strftime(log_name, 128, "%Y.%m.%d-%H:%M:%S.log", &time_l);
+        }
+        /* 创建新文件，所以指定 O_TRUNC 标志 */
+        log_oflag = (O_RDWR | O_CREAT | O_TRUNC);
+    }
+    else
+    {
+        if (0 == get_latest_log(log_name))  /* 没有指定写入新log文件，但是当前目录下没有log文件 */
+        {
+            goto get_time_named;
+        }
+        else
+        {
+            log_oflag = (O_RDWR | O_APPEND | O_CREAT);
+        }
+    }
+
+    log_fd = open(log_name, log_oflag, S_IRUSR | S_IWUSR);
     if (log_fd == -1)
     {
-        log_out(LOG_CONSOLE, "create log file error\n");
+        log_out(LOG_CONSOLE, "create log file %s error\n", log_name);
     }
-    base_info_store(argc, argv,(odd_count_flag? com_count+1:com_count), comlist);
+    /* 记录测试细节之前，先记录测试基本信息 */
+    base_info_store(argc, argv,(odd_count_flag? com_count+1:com_count), comlist, time_l);
 
     /* 申请与总设备数量相同的空间，用于存放测试失败的设备 */
     test_failed_list = malloc(sizeof(char*)*com_count);
@@ -413,6 +452,8 @@ int main(int argc, char **argv)
     {
         log_out(LOG_FILE|LOG_CONSOLE, "not test count: 1\t\e[1;31m%s%s\e[0m\n", OUT_NAME(comlist[com_count]->d_name));
     }
+
+    log_out(LOG_FILE, "*********************************************************\n\n\n");
 
     /* 释放namelist */
     free(comlist);
@@ -624,12 +665,12 @@ static unsigned char check_args(int argc, char **argv)
                 if (argc == 3)  /* 没有指定其他选项 */
                 {
                 }
-                else if (argc > 4)  /* 有可能使用了 -E 选项 */
+                else if (argc > 3)  /* 有可能使用了 -E 或 -N 选项 */
                 {
                     if (g_cmd.sub_option == 0)
                     {
-                        opt = getopt(argc, argv, "E");
-                        if (opt == OPTION_SUB_EXCLUDE)
+                        opt = getopt(argc, argv, sub_opts);
+                        if (opt == OPTION_SUB_EXCLUDE && argc > 4)
                         {
                             g_cmd.sub_option = OPTION_SUB_EXCLUDE;
                             g_cmd.sub_arg_count = argc-4;
@@ -640,6 +681,17 @@ static unsigned char check_args(int argc, char **argv)
                                 g_cmd.sub_args[arg_index] = malloc(strlen(argv[i])+1);
                                 strcpy(g_cmd.sub_args[arg_index], argv[i]);
                                 arg_index++;
+                            }
+                        }
+                        else if (opt == OPTION_SUB_NEWLOG)
+                        {
+                            g_cmd.sub_option = OPTION_SUB_NEWLOG;
+                            g_cmd.sub_arg_count = ((optarg==NULL) ? 0:1);
+                            if (g_cmd.sub_arg_count)
+                            {
+                                g_cmd.sub_args = malloc(sizeof(char*)*g_cmd.sub_arg_count);
+                                g_cmd.sub_args[0] = malloc(strlen(optarg)+1);
+                                strcpy(g_cmd.sub_args[arg_index], optarg);
                             }
                         }
                         else
@@ -714,6 +766,9 @@ static unsigned char check_args(int argc, char **argv)
                 }
 
                 break;
+            case OPTION_SUB_NEWLOG:
+                /* 出于控制程序体量的原因，强制要求-N选项不能出现在第一个 */
+                log_out(LOG_CONSOLE, "option '-N' must after '-s', '-e'.etc\n");
             default:
                 g_cmd.main_option = OPTION_HELP;
                 break;
@@ -729,8 +784,8 @@ static unsigned char check_args(int argc, char **argv)
                 "\t\t-h: print this manual\n"
                 "\t\t-l: -l <com-prefix> -- list device\n"
                 "\t\t-c: -c <com-prefix> -- display connections\n"
-                "\t\t-e: -e <com-prefix> [-E [device1] ... ] -- one transmit one receive [exclude device1 ...]\n"
-                "\t\t-s: -s <com-prefix> [-E [device1] ... ] -- self transmit and receive [exclude device1 ...]\n"
+                "\t\t-e: -e <com-prefix> [-E [device1] ... ] [-N[log name]] -- one transmit one receive [exclude device1 ...]\n"
+                "\t\t-s: -s <com-prefix> [-E [device1] ... ] [-N[log name]] -- self transmit and receive [exclude device1 ...]\n"
                 "\t\t-d: -d <com-prefix> <com1> [com2] -- debug com1 and [com2]\n"
                 "\tcom-prefix: \n"
                 "\t\tcom device name prefix\n",
@@ -1094,11 +1149,17 @@ static int try_get_result(int wait_ms)
  * @param argv [char**]             参数数组
  * @param com_count [int]           测试的串口数量
  * @param comlist [struct dirent**] 测试的串口设备文件实例数组   
+ * @param time_l [struct tm]        测试执行时间
  * @return [void]
  */
-static void base_info_store(int argc, char **argv, int com_count, struct dirent **comlist)
+static void base_info_store(int argc, char **argv, int com_count, struct dirent **comlist, struct tm time_l)
 {
     int i;
+    char log_exec_time[128] = {0};
+
+    /* 记录命令执行时间 */
+    strftime(log_exec_time, 128, "%Y.%m.%d-%H:%M:%S", &time_l);
+    log_out(LOG_FILE, "%s\n", log_exec_time);
 
     /* 记录启动测试的命令 */
     log_out(LOG_FILE, "command: ");
@@ -1185,4 +1246,60 @@ static void free_cmd(void *cmd)
         free(temp->sub_args[i]);
     }
     free(temp->sub_args);
+}
+
+/*** 
+ * @brief 筛选以 .log 结尾的文件
+ * @param *dir_ent [dirent]     目录下文件的实例
+ * @return [int]                符合条件返回 1，否则返回0
+ */
+static int find_log(const struct dirent *dir_ent)
+{
+    if (strcmp(&((dir_ent->d_name)[strlen(dir_ent->d_name) - 4]), ".log") == 0) 
+    {
+        return 1;
+    }
+
+        return 0;
+}
+
+/*** 
+ * @brief 获取最新被修改的log文件名
+ * @param *log_name [char]      out: 结果
+ * @return [int]                不存在log文件返回0，否则返回1
+ */
+static int get_latest_log(char *log_name)
+{
+    struct dirent **log_list;   /* log文件实例列表 */
+    int log_count = 0;          /* 列表长度 */
+    int i;
+    struct stat temp;           /* 临时记录当前遍历文件的状态信息 */
+    struct stat last_s;         /* 目前最新修改的文件的状态信息 */
+    int latest_i = -1;          /* 最新修改文件在log_list中的索引 */
+
+    log_count = scandir("./", &log_list, find_log, versionsort);
+
+    for (i = 0; i < log_count; i++)
+    {
+        stat(log_list[i]->d_name, &temp);
+        if (latest_i == -1 || temp.st_mtim.tv_sec > last_s.st_mtim.tv_sec)
+        {
+            /* 保存当前最新的文件的状态信息 */
+            latest_i = i;
+            memcpy(&last_s, &temp, sizeof(struct stat));
+        }
+    }
+
+    /* latest_i未被修改，即证明当前目录下没有log文件 */
+    if (latest_i == -1)    
+    {
+        free(log_list);
+        return 0;
+    }
+    else
+    {
+        strcpy(log_name, log_list[latest_i]->d_name);
+        free(log_list);
+        return 1;
+    }
 }
