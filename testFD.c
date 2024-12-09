@@ -2,7 +2,7 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-06 13:51:17
+ * @LastEditTime : 2024-12-09 09:43:32
  * @Description  : linux环境下串口自动测试程序
  */
 
@@ -200,6 +200,11 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    /* 获取并格式化当前系统时间 */
+    time(&log_time);
+    localtime_r(&log_time, &time_l);
+    strftime(log_name, 128, "%Y.%m.%d-%H:%M:%S.log", &time_l);
+
     /* 如果当前是测试选项 */
     if (option_ret == OPTION_DEBUGCOM)
     {
@@ -230,14 +235,6 @@ int main(int argc, char **argv)
         {
             sprintf(log_name, "./%s.log", g_cmd.sub_args[0]);
         }
-        else
-        {
-get_time_named:
-            /* 获取并格式化时间 */
-            time(&log_time);
-            localtime_r(&log_time, &time_l);
-            strftime(log_name, 128, "%Y.%m.%d-%H:%M:%S.log", &time_l);
-        }
         /* 创建新文件，所以指定 O_TRUNC 标志 */
         log_oflag = (O_RDWR | O_CREAT | O_TRUNC);
     }
@@ -245,7 +242,7 @@ get_time_named:
     {
         if (0 == get_latest_log(log_name))  /* 没有指定写入新log文件，但是当前目录下没有log文件 */
         {
-            goto get_time_named;
+            log_oflag = (O_RDWR | O_CREAT | O_TRUNC);
         }
         else
         {
