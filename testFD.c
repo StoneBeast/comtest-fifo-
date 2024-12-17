@@ -2,18 +2,15 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-03 18:57:40
- * @Description  : 使用fifo模拟串口，测试程序
+ * @LastEditTime : 2024-12-09 09:43:32
+ * @Description  : linux环境下串口自动测试程序
  */
 
-// TODO: 优化debug时选择同一个串口的调用流程
-// TODO: 考虑log文件命名规则，处理ANSI控制字符输出到文件
 // TODO: 从程序健壮性的角度考虑，线程创建失败以及线程结束失败的情况
-// TODO: 参考其他程序处理传入参数的处理流程
 // TODO: 可以考虑添加进度条
 // TODO: 可以将出现错误的打印恢复出来
 // TODO: 修改log文件存储逻辑
-// TODO: 考虑添加-l和-h
+// BUG:  -N 选项不能和 -E 和 -d一起使用，-d -N会报错；-E -N会把-N当作-E的参数；
 
 #define _GNU_SOURCE
 
@@ -28,24 +25,20 @@
 #include <semaphore.h>
 #include <sys/ioctl.h>
 #include <stdarg.h>
+#include <getopt.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #define IS_DEBUG    1   /* 测试模式标志 */
-#define TEST_SELF   0   /* 自测功能测试标志 */
+#define TEST_SELF   1   /* 自测功能测试标志 */
 #define DEBUG_INFO  0   /* debug输出标志 */
 
-#define BUF_LEN     126-33+1  /* buffer长度 */
+#define BUF_LEN     126-33+1    /* buffer长度 */
 #define READ_FD     0           /* pipe read/write fd */
 #define WRITE_FD    1
 #define END_SIG     "END"       /* 测试结束标志 */
 
-#define OPTIONS                 "ecsd"                                  /* 合法的options，用于判断 */
-#define OPT_PREFIX_RET(opt,pre) ((unsigned char)((opt<<4)|(pre<<0)))    /* 将options和prefix的位置信息放入一个8bit的数据中 */
-#define GET_OPT(ret)            ((unsigned char)((ret>>4)&(0x0f)))      /* 获取options的位置信息 */
-#define GET_PREFIX(ret)         ((unsigned char)((ret)&(0x0f)))         /* 获取prefix的位置信息 */
-#define OPTION_CONNECTION       'c'                                     /* options */
-#define OPTION_SELFTEST         's'
-#define OPTION_EACHOTHER        'e'
-#define OPTION_DEBUGCOM         'd'
 #define LOG_CONSOLE             ((unsigned short)(0x00FF))              /* log输出类型: 终端/log file输出 */
 #define LOG_FILE                ((unsigned short)(0xFF00))
 #define LOG_CONSOLE_ASSERT(t)   ((t & LOG_CONSOLE) == LOG_CONSOLE)      /* 判断log输出类型 */
@@ -81,23 +74,56 @@ static void heavy_work(void);
 
 #endif //! IS_DEBUG==1
 
-
 static void* thread_task(void *arg);
 static unsigned char check_args(int argc, char **argv);
 static void display_connection(int com_count, struct dirent **com_name);
 static int selector(const struct dirent *dir_ent);
 static void diff_buf(char *buf1, char *buf2);
-static int check_com_args(char **com_args, struct dirent **comlist, int com_count);
+static int check_com_args(char **com_args, int com_arg_count, struct dirent **comlist, int com_count);
 static void add_failed_list(char **list, int *count, char *failed_name);
 static void free_list(int list_len, char **list);
 static void log_out(unsigned short log_type, const char *fmt, ...);
 static void* read_task(void *arg);
 static int try_get_result(int wait_ms);
-static void base_info_store(int argc, char **argv, int com_count, struct dirent **comlist);
+static void base_info_store(int argc, char **argv, int com_count, struct dirent **comlist, struct tm time_l);
+static int exclude_com(char **com_args,  int com_arg_count, struct dirent **comlist, int com_count);
+static void free_cmd(void * cmd);
+static int get_latest_log(char *log_name);
 
 static sem_t sem_mw_tr, sem_mr_tw, sem_rt;  /* 主线程与子线程之间用于线程同步，子线程与读取线程之间用于轮询读取 */
 static char* com_prefix;                    /* 设备前缀 */
 static int log_fd;                          /* log文件fd */
+
+#define OPTION_CONNECTION   'c' /* options */
+#define OPTION_SELFTEST     's'
+#define OPTION_EACHOTHER    'e'
+#define OPTION_DEBUGCOM     'd'
+#define OPTION_LIST         'l'
+#define OPTION_HELP         'h'
+#define OPTION_SUB_EXCLUDE  'E'
+#define OPTION_SUB_NEWLOG   'N'
+
+static char* shortopts = "hl:c:s:e:d:EN::";
+static char* main_opts = "hlcsed";
+static char* sub_opts = "EN::";
+
+typedef struct {
+    char main_option;
+    int main_arg_count;
+    char ** main_args;
+    char sub_option;
+    int sub_arg_count;
+    char ** sub_args;
+} cmd_t;
+
+static cmd_t g_cmd = {
+    .main_option = 0,
+    .main_arg_count = 0,
+    .main_args = NULL,
+    .sub_option = 0,
+    .sub_arg_count = 0,
+    .sub_args = NULL
+};
 
 /*** 
  * @brief 
@@ -124,7 +150,12 @@ int main(int argc, char **argv)
     int failed_count = 0;               /* 测试未通过的设备数量 */
     char **test_failed_list;            /* 未通过测试的设备名称列表 */
     int odd_count_flag = 0;             /* 对测，且设备个数为奇数标志 */
-    char pre_read_buf[BUF_LEN+5] = {0}; /* 存放预读取的数据 */
+    char pre_read_buf[512] = {0};       /* 存放预读取的数据 */
+    time_t log_time;                    /* 执行测试的时间戳 */
+    struct tm time_l;                   /* 存储时间戳中的各个元素 */
+    char log_name[128] = {0};           /* log文件名 */
+    int log_oflag = 0;                  /* 打开/创建log文件时的flag */
+
 
 #if DEBUG_INFO
         int m_temp_sem_val;
@@ -137,20 +168,20 @@ int main(int argc, char **argv)
 
     /* 检查参数合法性，并获取com_prefix */
     arg_ret = check_args(argc, argv);
-    if (arg_ret == 0)
+    if (arg_ret == OPTION_HELP)
     {
-        return -1;
+        return 0;
     }
+
     /* 获取设备文件名前缀以及选项 */
     else
     {
-        com_prefix = argv[GET_PREFIX(arg_ret)];
-        option_ret = argv[GET_OPT(arg_ret)][1];
+        com_prefix = g_cmd.main_args[0];
+        option_ret = g_cmd.main_option;
     }
 
     /* 获取所有待测设备，并按照名称排序 */
     com_count = scandir(DEV_DIR, &comlist, selector, versionsort);
-    log_out(LOG_CONSOLE, "count: %d\n", com_count);
     
     if (option_ret == OPTION_CONNECTION)
     {
@@ -159,30 +190,73 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (option_ret == OPTION_LIST)
+    {
+        log_out(LOG_CONSOLE, "\e[1;32mdevice list:\e[0m\n");
+        for (i = 0; i < com_count; i++)
+        {
+            log_out(LOG_CONSOLE, "%s%s\n", OUT_NAME(comlist[i]->d_name));
+        }
+        return 0;
+    }
+
+    /* 获取并格式化当前系统时间 */
+    time(&log_time);
+    localtime_r(&log_time, &time_l);
+    strftime(log_name, 128, "%Y.%m.%d-%H:%M:%S.log", &time_l);
+
     /* 如果当前是测试选项 */
     if (option_ret == OPTION_DEBUGCOM)
     {
-        if (check_com_args(&(argv[3]), comlist, com_count) == 0)
+        if (check_com_args(&(g_cmd.main_args[1]), g_cmd.main_arg_count-1, comlist, com_count) == 0)
         {
             log_out(LOG_CONSOLE, "error: invalid com device name\n");
             return -1;
         }
 
-        com_count = 2;
+        com_count = (g_cmd.main_arg_count-1);
     }
 
-    if ((option_ret == OPTION_EACHOTHER || option_ret == OPTION_DEBUGCOM) && (com_count%2 == 1))
+    if ((option_ret == OPTION_EACHOTHER || option_ret == OPTION_SELFTEST) && g_cmd.sub_option == OPTION_SUB_EXCLUDE)
+    {
+        com_count = exclude_com(g_cmd.sub_args, g_cmd.sub_arg_count, comlist, com_count);
+    }
+
+    if (option_ret == OPTION_EACHOTHER && (com_count%2 == 1))
     {
         odd_count_flag = 1;
         com_count --;
     }
 
-    log_fd = open("./log.txt", O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    /* 指定了存储在新的log文件中 */
+    if (g_cmd.sub_option == OPTION_SUB_NEWLOG)
+    {
+        if (g_cmd.sub_arg_count)    /* 是否指定的新log文件的名称 */
+        {
+            sprintf(log_name, "./%s.log", g_cmd.sub_args[0]);
+        }
+        /* 创建新文件，所以指定 O_TRUNC 标志 */
+        log_oflag = (O_RDWR | O_CREAT | O_TRUNC);
+    }
+    else
+    {
+        if (0 == get_latest_log(log_name))  /* 没有指定写入新log文件，但是当前目录下没有log文件 */
+        {
+            log_oflag = (O_RDWR | O_CREAT | O_TRUNC);
+        }
+        else
+        {
+            log_oflag = (O_RDWR | O_APPEND | O_CREAT);
+        }
+    }
+
+    log_fd = open(log_name, log_oflag, S_IRUSR | S_IWUSR);
     if (log_fd == -1)
     {
-        log_out(LOG_CONSOLE, "create log file error\n");
+        log_out(LOG_CONSOLE, "create log file %s error\n", log_name);
     }
-    base_info_store(argc, argv,(odd_count_flag? com_count+1:com_count), comlist);
+    /* 记录测试细节之前，先记录测试基本信息 */
+    base_info_store(argc, argv,(odd_count_flag? com_count+1:com_count), comlist, time_l);
 
     /* 申请与总设备数量相同的空间，用于存放测试失败的设备 */
     test_failed_list = malloc(sizeof(char*)*com_count);
@@ -218,15 +292,7 @@ int main(int argc, char **argv)
         memset(write_buf, 0, BUF_LEN);
 
         /* 打开设备 */
-        // TODO: 由于用于模拟设备的fifo的限制，只能都以读写模式打开，实际的环境中可以测试以只写模式打开
-        if (option_ret == OPTION_SELFTEST)
-        {
-            m_fifo_fd = open(m_fifo_name, O_RDWR);
-        }
-        else
-        {
-            m_fifo_fd = open(m_fifo_name, O_RDWR);
-        }
+        m_fifo_fd = open(m_fifo_name, O_RDWR);
 
         if (m_fifo_fd<=0)
         {
@@ -241,7 +307,7 @@ int main(int argc, char **argv)
 #endif //! IS_DEBUG==1
 
         /* 如果当前是自测，则子线程需要监听的设备fd以及设备文件名均与主线程相同 */
-        if (option_ret == OPTION_SELFTEST)
+        if (option_ret == OPTION_SELFTEST || (option_ret == OPTION_DEBUGCOM && com_count == 1))
         {
             strcpy(t_fifo_name, m_fifo_name);
         }
@@ -267,9 +333,10 @@ int main(int argc, char **argv)
         ioctl(t_fifo_fd, FIOBAUDRATE, 115200);
         ioctl(t_fifo_fd, SERIAL_MODE_SET, MODE_RS422);
 #endif //! IS_DEBUG==1
+        /* 开始测试之前，先向需要先读取一次，防止设备中有未被读出的数据；读取之前先写入是为了防止没有数据时被程序被阻塞 */
         write(t_fifo_fd, "test", 5);
         usleep(10 * 1000);
-        read(t_fifo_fd, pre_read_buf, BUF_LEN+5);
+        read(t_fifo_fd, pre_read_buf, 512);
         close(t_fifo_fd);
 
         /* 通过pipe将需要测试的设备fd发送给接收线程，并通过post信号量通知子线程 */
@@ -376,8 +443,12 @@ int main(int argc, char **argv)
         log_out(LOG_FILE|LOG_CONSOLE, "not test count: 1\t\e[1;31m%s%s\e[0m\n", OUT_NAME(comlist[com_count]->d_name));
     }
 
+    log_out(LOG_FILE, "*********************************************************\n\n\n");
+
     /* 释放namelist */
     free(comlist);
+
+    free_cmd(&g_cmd);
 
     /* 释放test_failed_list的所有空间 */
     free_list(failed_count, test_failed_list);
@@ -534,67 +605,183 @@ static void heavy_work(void)
 #endif //! IS_DEBUG==1
 
 /*** 
- * @brief   判断参数合法性，并返回options的索引；强制要求前两个参数一个是选项，一个是前缀
+ * @brief 判断参数合法性，根据结果填充全局变量cmd结构体，并返回其中的main_option成员
  * @param argc [int]        参数个数
  * @param argv [char**]     参数数组
- * @return [unsigned char]  0: 参数非法 [0:3]:prefix的位置, [4:7]:option的位置
+ * @return [unsigned char]  cmd的main_option成员
  */
 static unsigned char check_args(int argc, char **argv)
 {
-    unsigned char check_flag = 1;   /* 校验通过标志计数 */
+    int opt = 0;
+    int arg_index = 0;
+    int i;
 
-    /* 校验参数个数以及参数格式 */
-    if (argc != 3 && argc != 5)
+    /* 没有参数 */
+    if ((opt = getopt(argc, argv, shortopts)) == -1)
     {
-        check_flag = 0;
-        log_out(LOG_CONSOLE, "\e[1;31mToo many or less args\e[0m\n");
-    }
-    else if ((argv[1])[0] != '-' && (argv[2])[0] != '-') 
-    {
-        check_flag = 0;
-        log_out(LOG_CONSOLE, "\e[1;31mNo options\e[0m\n");
-    }
-    else if ((argv[1])[0] == '-' && (argv[2])[0] == '-') 
-    {
-        check_flag = 0;
-        log_out(LOG_CONSOLE, "\e[1;31mNo com-prefix\e[0m\n");
-    }
-    else if ((argv[1])[0] == '-')   /* 获取选项参数以及前缀参数的位置 */
-    {
-        check_flag = OPT_PREFIX_RET(1, 2);
+        g_cmd.main_option = OPTION_HELP;
     }
     else
     {
-        check_flag = OPT_PREFIX_RET(2, 1);
+        switch (opt)
+        {
+            case OPTION_HELP:   /* help no argument */
+                g_cmd.main_option = OPTION_HELP;
+                log_out(LOG_CONSOLE, "Too many arguments\n");
+                break;
+            case OPTION_LIST:
+            case OPTION_CONNECTION:
+                if (argc == 3)
+                {
+                    g_cmd.main_option = opt;
+                    g_cmd.main_arg_count = 1;
+                    g_cmd.main_args = malloc(sizeof(char*) * g_cmd.main_arg_count);
+                    g_cmd.main_args[0] = malloc(strlen(optarg)+1);
+                    strcpy(g_cmd.main_args[0], optarg);
+                }
+                else
+                {
+                    g_cmd.main_option = OPTION_HELP;
+                    log_out(LOG_CONSOLE, "Too many arguments\n");
+                }
+                break;
+            case OPTION_SELFTEST:
+            case OPTION_EACHOTHER:
+                g_cmd.main_option = opt;
+                g_cmd.main_arg_count = 1;
+                g_cmd.main_args = malloc(sizeof(char*)* g_cmd.main_arg_count);
+                g_cmd.main_args[0] = malloc(strlen(optarg)+1);
+                strcpy(g_cmd.main_args[0], optarg);
+                if (argc == 3)  /* 没有指定其他选项 */
+                {
+                }
+                else if (argc > 3)  /* 有可能使用了 -E 或 -N 选项 */
+                {
+                    if (g_cmd.sub_option == 0)
+                    {
+                        opt = getopt(argc, argv, sub_opts);
+                        if (opt == OPTION_SUB_EXCLUDE && argc > 4)
+                        {
+                            g_cmd.sub_option = OPTION_SUB_EXCLUDE;
+                            g_cmd.sub_arg_count = argc-4;
+                            g_cmd.sub_args = malloc(sizeof(char*)*g_cmd.sub_arg_count);
+                            arg_index = 0;
+                            for (i = optind; i < argc; i++)
+                            {
+                                g_cmd.sub_args[arg_index] = malloc(strlen(argv[i])+1);
+                                strcpy(g_cmd.sub_args[arg_index], argv[i]);
+                                arg_index++;
+                            }
+                        }
+                        else if (opt == OPTION_SUB_NEWLOG)
+                        {
+                            g_cmd.sub_option = OPTION_SUB_NEWLOG;
+                            g_cmd.sub_arg_count = ((optarg==NULL) ? 0:1);
+                            if (g_cmd.sub_arg_count)
+                            {
+                                g_cmd.sub_args = malloc(sizeof(char*)*g_cmd.sub_arg_count);
+                                g_cmd.sub_args[0] = malloc(strlen(optarg)+1);
+                                strcpy(g_cmd.sub_args[arg_index], optarg);
+                            }
+                        }
+                        else
+                        {
+                            g_cmd.main_option = OPTION_HELP;
+                            log_out(LOG_CONSOLE, "Too many arguments\n");
+                        }
+                    }
+                }
+                else
+                {
+                    g_cmd.main_option = OPTION_HELP;
+                    if (strcmp(argv[3], "-E") == 0)
+                    {
+                        log_out(LOG_CONSOLE, "No exclude arguments\n");
+                    }
+                    else
+                    {
+                        log_out(LOG_CONSOLE, "Too many arguments\n");
+                    }
+                }
+                break;
+            case OPTION_DEBUGCOM:
+                if ((argc == 5 || argc == 4) && (strcmp(argv[1], "-d") == 0))
+                {
+                    g_cmd.main_option = opt;
+                    g_cmd.main_arg_count = argc-2;
+                    g_cmd.main_args = malloc(sizeof(char*)* g_cmd.main_arg_count);
+                    arg_index = 0;
+                    for (i = optind-1; i < argc; i++)
+                    {
+                        g_cmd.main_args[arg_index] = malloc(strlen(argv[i] +1));
+                        strcpy(g_cmd.main_args[arg_index], argv[i]);
+                        arg_index++;
+                    }
+                }
+                else 
+                {
+                    g_cmd.main_option = OPTION_HELP;
+                    log_out(LOG_CONSOLE, "Too many or less arguments\n");
+                }
+                break;
+            case OPTION_SUB_EXCLUDE:
+                if ((opt = getopt(argc, argv, "s:e:")) != -1)
+                {
+                    if (optind == argc)
+                    {
+                        g_cmd.main_option = opt;
+                        g_cmd.main_arg_count = 1;
+                        g_cmd.main_args = malloc(sizeof(char*)* g_cmd.main_arg_count);
+                        g_cmd.main_args[0] = malloc(strlen(optarg)+1);
+                        strcpy(g_cmd.main_args[0], optarg);
+                    }
+                }
+                if (strchr("se", g_cmd.main_option) != NULL)
+                {
+                    g_cmd.sub_option = OPTION_SUB_EXCLUDE;
+                    g_cmd.sub_arg_count = argc-2-1-1;
+                    g_cmd.sub_args = malloc(sizeof(char*)*g_cmd.sub_arg_count);
+                    i = 0;
+                    for (arg_index = 2; arg_index < argc-2; arg_index++)
+                    {
+                        g_cmd.sub_args[i] = malloc(strlen(argv[arg_index])+1);
+                        strcpy(g_cmd.sub_args[i], argv[arg_index]);
+                        i++;
+                    }
+                }
+                else
+                {
+                    g_cmd.main_option = OPTION_HELP;
+                    log_out(LOG_CONSOLE, "Incalid option\n");
+                }
+
+                break;
+            case OPTION_SUB_NEWLOG:
+                /* 出于控制程序体量的原因，强制要求-N选项不能出现在第一个 */
+                log_out(LOG_CONSOLE, "option '-N' must after '-s', '-e'.etc\n");
+            default:
+                g_cmd.main_option = OPTION_HELP;
+                break;
+        }
     }
 
-    /* 校验选项参数是否合法 */
-    if(NULL == strchr(OPTIONS, (argv[GET_OPT(check_flag)])[1]))
+
+    if (g_cmd.main_option == OPTION_HELP)
     {
-        log_out(LOG_CONSOLE, "\e[1;31mInvain options\e[0m\n");
-        check_flag = 0;
+        log_out(LOG_CONSOLE,
+                "usage: %s <options> [arguments]\n"
+                "\toptions:\n"
+                "\t\t-h: print this manual\n"
+                "\t\t-l: -l <com-prefix> -- list device\n"
+                "\t\t-c: -c <com-prefix> -- display connections\n"
+                "\t\t-e: -e <com-prefix> [-E [device1] ... ] [-N[log name]] -- one transmit one receive [exclude device1 ...]\n"
+                "\t\t-s: -s <com-prefix> [-E [device1] ... ] [-N[log name]] -- self transmit and receive [exclude device1 ...]\n"
+                "\t\t-d: -d <com-prefix> <com1> [com2] -- debug com1 and [com2]\n"
+                "\tcom-prefix: \n"
+                "\t\tcom device name prefix\n",
+                argv[0]);
     }
-
-    /* 检查某些特定组合 */
-    if (argc != 5 && ((argv[GET_OPT(check_flag)])[1] == OPTION_DEBUGCOM))
-    {
-        check_flag = 0;
-        log_out(LOG_CONSOLE, "\e[1;31m-d Must have 2 COM args\e[0m\n");
-    }
-
-    if (check_flag == 0)
-    {
-        log_out(LOG_CONSOLE, "usage: %s <options> <com-prefix> [<com1> <com2>]\n"
-                            "\toptions:\n"
-                                "\t\t-e: one transmit one receive\n"
-                                "\t\t-s: self transmit and receive\n"
-                                "\t\t-c: display connections\n"
-                                "\t\t-d: -d <com-prefix> <com1> <com2> :debug com1 and com2\n"
-                            "\tcom-prefix: \n"
-                                "\t\tcom device name prefix\n", argv[0]);
-    }
-
-    return check_flag;
+    return g_cmd.main_option;
 }
 
 /*** 
@@ -629,7 +816,8 @@ static void display_connection(int s_com_count, struct dirent **com_name)
  */
 static int selector(const struct dirent *dir_ent)
 {
-    if (strncmp(com_prefix, dir_ent->d_name, strlen(com_prefix)) == 0)
+    if ((strncmp(com_prefix, dir_ent->d_name, strlen(com_prefix)) == 0) 
+        && (strlen(com_prefix) < strlen(dir_ent->d_name)))
     {
         return 1;
     }
@@ -736,50 +924,59 @@ static void diff_buf(char *buf1, char *buf2)
 
 /*** 
  * @brief 检查指定的两个参数串口是否存在
- * @param argv [char**]                 传入的com参数的列表
+ * @param com_args [char**]             传入的com参数的列表
+ * @param com_arg_count [int]           传入的com参数的列表长度
  * @param comlist [struct dirent***]    out: 指向系统中所有待测的设备文件列表的指针,参数合法时会返回只含有参数的列表指针
- * @param com_count [int]               comlist的长度
+ * @param s_com_count [int]             comlist的长度
  * @return [int]:                       1: 参数合法; 0: 参数非法
  */
-static int check_com_args(char **com_args, struct dirent **s_comlist, int s_com_count)
+static int check_com_args(char **com_args, int com_arg_count, struct dirent **s_comlist, int s_com_count)
 {
     int check_flag = 0;         /* 检查通过标志计数 */
-    int i, com1_inx, com2_inx;  /* com1_inx,com2_inx: 记录两个参数在comlist中匹配的索引 */
+    int i, com1_inx = -1, com2_inx = -1;  /* com1_inx,com2_inx: 记录两个参数在comlist中匹配的索引 */
     struct dirent temp1;        /* 临时变量 */
     struct dirent temp2;
 
     /* 循环比较列表中的成员是否包含传入的参数 */
     for (i = 0; i < s_com_count; i++)
     {
-        if (strcmp(com_args[0], (s_comlist)[i]->d_name) == 0) 
+        if ((strcmp(com_args[0], (s_comlist)[i]->d_name) == 0) && (com1_inx == -1)) 
         {
             /* 记录索引，递增标志计数 */
             com1_inx = i;
             check_flag++;
         }
         /* 允许两个测试串口选择同一个 */
-        // if (strcmp(com_args[1], (s_comlist)[i]->d_name) == 0)
-        else if (strcmp(com_args[1], (s_comlist)[i]->d_name) == 0)
+        if (com_arg_count == 2)
         {
-            com2_inx = i;
-            check_flag++;
+            if ((strcmp(com_args[1], (s_comlist)[i]->d_name) == 0) && (com2_inx == -1)) 
+            {
+                com2_inx = i;
+                check_flag++;
+            }
         }
 
-        if (check_flag == 2)
+        if (check_flag == com_arg_count)
         {
             break;
         }
     }
 
-    if (check_flag == 2)
+    if (check_flag == com_arg_count)
     {
         /* 两个串口都存在 */
         /* 将两个设备文件信息保存出来 */
         memcpy(&temp1, (s_comlist)[com1_inx], sizeof(struct dirent));
-        memcpy(&temp2, (s_comlist)[com2_inx], sizeof(struct dirent));
+        if (com_arg_count == 2)
+        {
+            memcpy(&temp2, (s_comlist)[com2_inx], sizeof(struct dirent));
+        }
 
         strcpy((*(s_comlist[0])).d_name, temp1.d_name);
-        strcpy((*(s_comlist[1])).d_name, temp2.d_name);
+        if (com_arg_count == 2)
+        {
+            strcpy((*(s_comlist[1])).d_name, temp2.d_name);
+        }
 
         return 1;
     }
@@ -942,11 +1139,17 @@ static int try_get_result(int wait_ms)
  * @param argv [char**]             参数数组
  * @param com_count [int]           测试的串口数量
  * @param comlist [struct dirent**] 测试的串口设备文件实例数组   
+ * @param time_l [struct tm]        测试执行时间
  * @return [void]
  */
-static void base_info_store(int argc, char **argv, int com_count, struct dirent **comlist)
+static void base_info_store(int argc, char **argv, int com_count, struct dirent **comlist, struct tm time_l)
 {
     int i;
+    char log_exec_time[128] = {0};
+
+    /* 记录命令执行时间 */
+    strftime(log_exec_time, 128, "%Y.%m.%d-%H:%M:%S", &time_l);
+    log_out(LOG_FILE, "%s\n", log_exec_time);
 
     /* 记录启动测试的命令 */
     log_out(LOG_FILE, "command: ");
@@ -966,4 +1169,127 @@ static void base_info_store(int argc, char **argv, int com_count, struct dirent 
         log_out(LOG_FILE, "%s%s ", OUT_NAME(comlist[i]->d_name));
     }
     log_out(LOG_FILE, " \n\n");
+}
+
+/*** 
+ * @brief 从comlist中剔除com_args中列出的串口设备文件
+ * @param com_args [char**]             需要剔除的串口文件名称列表
+ * @param com_arg_count [int]           该列表的长度
+ * @param comlist [struct dirent**]     串口文件列表
+ * @param com_count [int]               comlist的长度
+ * @return [int]                        剔除后剩余的串口个数
+ */
+static int exclude_com(char **com_args, int com_arg_count, struct dirent **comlist, int com_count)
+{
+    int p = 0;              /* 记录被最后填充进comlist的位置 */
+    int list_i = 0;
+    int arg_i = 0;
+    int res_count = 0;      /* 剩余的设备数量 */
+    int ex_flag = 0;
+    struct dirent temp;
+
+    /* 遍历comlist */
+    for (list_i = 0; list_i < com_count; list_i++)
+    {
+        ex_flag = 0;
+        /* 遍历排除列表 */
+        for (arg_i = 0; arg_i < com_arg_count; arg_i++)
+        {
+            /* 发现在排除列表上的，退出循环，置位排除位 */
+            if (strcmp(com_args[arg_i], comlist[list_i]->d_name) == 0)
+            {
+                ex_flag = 1;
+                break;
+            }
+        }
+        /* 未被排除的成员重新添加进列表 */
+        if (ex_flag == 0)
+        {
+            memcpy(&temp, comlist[list_i], sizeof(struct dirent));
+            strcpy(comlist[p]->d_name, temp.d_name);
+            p++;
+            res_count++;
+        }
+    }
+
+    return res_count;
+}
+
+/*** 
+ * @brief 释放cmd_t结构体
+ * @param cmd [void*]   指向需要释放的结构体指针   
+ * @return [void]
+ */
+static void free_cmd(void *cmd)
+{
+    int i = 0;
+    cmd_t *temp = cmd;
+
+    for (i = 0; i < temp->main_arg_count; i++)
+    {
+        free(temp->main_args[i]);
+    }
+    free(temp->main_args);
+
+    for (i = 0; i < temp->sub_arg_count; i++)
+    {
+        free(temp->sub_args[i]);
+    }
+    free(temp->sub_args);
+}
+
+/*** 
+ * @brief 筛选以 .log 结尾的文件
+ * @param *dir_ent [dirent]     目录下文件的实例
+ * @return [int]                符合条件返回 1，否则返回0
+ */
+static int find_log(const struct dirent *dir_ent)
+{
+    if (strcmp(&((dir_ent->d_name)[strlen(dir_ent->d_name) - 4]), ".log") == 0) 
+    {
+        return 1;
+    }
+
+        return 0;
+}
+
+/*** 
+ * @brief 获取最新被修改的log文件名
+ * @param *log_name [char]      out: 结果
+ * @return [int]                不存在log文件返回0，否则返回1
+ */
+static int get_latest_log(char *log_name)
+{
+    struct dirent **log_list;   /* log文件实例列表 */
+    int log_count = 0;          /* 列表长度 */
+    int i;
+    struct stat temp;           /* 临时记录当前遍历文件的状态信息 */
+    struct stat last_s;         /* 目前最新修改的文件的状态信息 */
+    int latest_i = -1;          /* 最新修改文件在log_list中的索引 */
+
+    log_count = scandir("./", &log_list, find_log, versionsort);
+
+    for (i = 0; i < log_count; i++)
+    {
+        stat(log_list[i]->d_name, &temp);
+        if (latest_i == -1 || temp.st_mtim.tv_sec > last_s.st_mtim.tv_sec)
+        {
+            /* 保存当前最新的文件的状态信息 */
+            latest_i = i;
+            memcpy(&last_s, &temp, sizeof(struct stat));
+        }
+    }
+
+    /* latest_i未被修改，即证明当前目录下没有log文件 */
+    if (latest_i == -1)    
+    {
+        free(log_list);
+        return 0;
+    }
+    else
+    {
+        strcpy(log_name, log_list[latest_i]->d_name);
+        free(log_list);
+        return 1;
+    }
 }

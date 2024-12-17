@@ -1,0 +1,7 @@
+.cache
+dev
+dev_l
+*.json
+*.log
+fd
+testFD
