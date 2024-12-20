@@ -2,7 +2,7 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-20 10:45:36
+ * @LastEditTime : 2024-12-20 11:15:25
  * @Description  : linux环境下串口自动测试程序
  */
 
@@ -627,8 +627,8 @@ static bool check_args(int argc, char **argv)
     /* 循环解析option */
     while ((opt = getopt(argc, temp_argv, short_opts)) != -1) 
     {
-        /* 如果optarg不为空，则optind为optarg索引+1 */
-        if (optarg != NULL)
+        /* 如果optarg不为空，则optind为optarg索引+1, 其中可选参数的选项较为特殊 */
+        if (optarg != NULL && opt != OPTION_NEWLOG)
             argv_index[optind-2] = 1;
         argv_index[optind-1] = 1;
 
