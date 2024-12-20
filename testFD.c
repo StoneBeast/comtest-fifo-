@@ -2,7 +2,7 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-20 10:33:00
+ * @LastEditTime : 2024-12-20 10:45:36
  * @Description  : linux环境下串口自动测试程序
  */
 
@@ -314,7 +314,7 @@ int main(int argc, char **argv)
 
 #if !IS_DEBUG //! IS_DEBUG==1
         ioctl(m_fifo_fd, FIOSETOPTIONS, CS8);
-        ioctl(m_fifo_fd, FIOBAUDRATE, 115200);
+        ioctl(m_fifo_fd, FIOBAUDRATE, g_cmd->baud_rate);
         ioctl(m_fifo_fd, SERIAL_MODE_SET, MODE_RS422);
 #endif //! IS_DEBUG==1
 
@@ -342,7 +342,7 @@ int main(int argc, char **argv)
         t_fifo_fd = open(t_fifo_name, O_RDWR);
 #if !IS_DEBUG //! IS_DEBUG==1
         ioctl(t_fifo_fd, FIOSETOPTIONS, CS8);
-        ioctl(t_fifo_fd, FIOBAUDRATE, 115200);
+        ioctl(t_fifo_fd, FIOBAUDRATE, g_cmd->baud_rate);
         ioctl(t_fifo_fd, SERIAL_MODE_SET, MODE_RS422);
 #endif //! IS_DEBUG==1
         /* 开始测试之前，先向需要先读取一次，防止设备中有未被读出的数据；读取之前先写入是为了防止没有数据时被程序被阻塞 */
@@ -525,7 +525,7 @@ static void *thread_task(void *arg)
 
 #if !IS_DEBUG //! IS_DEBUG==1
             ioctl(t_fifo_fd, FIOSETOPTIONS, CS8);
-            ioctl(t_fifo_fd, FIOBAUDRATE, 115200);
+            ioctl(t_fifo_fd, FIOBAUDRATE, g_cmd->baud_rate);
             ioctl(t_fifo_fd, SERIAL_MODE_SET, MODE_RS422);
 #endif //! IS_DEBUG==1
 
