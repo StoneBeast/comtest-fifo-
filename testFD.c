@@ -2,7 +2,7 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-20 09:52:05
+ * @LastEditTime : 2024-12-20 10:28:03
  * @Description  : linux环境下串口自动测试程序
  */
 
@@ -10,7 +10,7 @@
 // TODO: 可以考虑添加进度条
 // TODO: 可以将出现错误的打印恢复出来
 // TODO: 修改log文件存储逻辑
-// BUG:  -N 选项不能和 -E 和 -d一起使用，-d -N会报错；-E -N会把-N当作-E的参数；
+// TODO: 实装波特率自定义、加大测试数据量、测试发送次数
 
 #define _GNU_SOURCE
 
@@ -229,9 +229,7 @@ int main(int argc, char **argv)
         com_count = g_cmd->test_argc;
     }
 
-    if ((g_cmd->test_opt == OPTION_EACHOTHER ||
-         g_cmd->test_opt == OPTION_SELFTEST) &&
-        g_cmd->exclude_dev == true) 
+    if ((g_cmd->test_opt != 0) && g_cmd->exclude_dev == true) 
         com_count = exclude_com(g_cmd->exclude_name, g_cmd->exclude_count, comlist, com_count);
 
     /* 如果测试选项为对测，且设备数量为奇数 */
@@ -290,6 +288,9 @@ int main(int argc, char **argv)
 #if IS_DEBUG == 1
     test_i = 0;
 #endif //! IS_DEBUG==1
+
+    if (com_count == 0)
+        log_out(LOG_CONSOLE, "no device: %sx\n", com_prefix);
 
     /* 循环获取目录下的所有文件对象 */
     for (i=0; i<com_count; i++)
