@@ -2,7 +2,7 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-19 18:10:40
+ * @LastEditTime : 2024-12-20 09:52:05
  * @Description  : linux环境下串口自动测试程序
  */
 
@@ -95,7 +95,7 @@ static void* init_cmd(void);
 static sem_t sem_mw_tr, sem_mr_tw, sem_rt;  /* 主线程与子线程之间用于线程同步，子线程与读取线程之间用于轮询读取 */
 static char* com_prefix;                    /* 设备前缀 */
 static int log_fd;                          /* log文件fd */
-extern char *optarg;
+extern char *optarg;                        /* getopt()相关参数 */
 extern int optind, opterr, optopt;
 
 #define OPTION_CONNECTION   'c' /* options */
@@ -103,25 +103,29 @@ extern int optind, opterr, optopt;
 #define OPTION_EACHOTHER    'e'
 #define OPTION_DEBUGCOM     'd'
 #define OPTION_LIST         'l'
-#define OPTION_SUB_EXCLUDE  'E'
-#define OPTION_SUB_NEWLOG   'N'
+#define OPTION_EXCLUDE      'E'
+#define OPTION_NEWLOG       'N'
+#define OPTION_SET_BAUD     'B'
+#define OPTION_SET_TIMES    'C'
 
+/* 程序支持的所有短参数，用于getopt()匹配 */
 static char* short_opts = "lcsed:E:N::B:C:";
 
+/* 用于存放解析解雇的结构体 */
 typedef struct 
 {
-    char *prefix;
-    char help_opt;
-    char test_opt;
-    unsigned short test_argc;
-    char **test_argv;
-    bool exclude_dev;
-    unsigned short exclude_count;
-    char ** exclude_name;
-    bool new_log;
-    char * new_log_name;
-    unsigned int baud_rate;
-    unsigned short times;
+    char *prefix;                   /* 设备名前缀 */
+    char help_opt;                  /* 帮助选项 */
+    char test_opt;                  /* 测试选项 */
+    unsigned short test_argc;       /* 测试参数数量 */
+    char **test_argv;               /* 测试参数数组 */
+    bool exclude_dev;               /* 是否排除设备 */
+    unsigned short exclude_count;   /* 排除设备的数量 */
+    char ** exclude_name;           /* 排除设备的名称数组 */
+    bool new_log;                   /* 是否生成新的log */
+    char * new_log_name;            /* 新log命名 */
+    unsigned int baud_rate;         /* 波特率 */
+    unsigned short times;           /* 测试发送数量 */
 }cmd_t;
 
 static cmd_t *g_cmd = NULL;
@@ -165,14 +169,15 @@ int main(int argc, char **argv)
     int test_i;
 #endif //!IS_DEBUG
 
-
+    /* 初始化g_cmd */
     g_cmd = (cmd_t*)init_cmd();
+
     /* 检查参数合法性，并获取com_prefix */
     arg_ret = check_args(argc, argv);
     if (!arg_ret)
         return -1;
     
-    /* 获取设备文件名前缀以及选项 */
+    /* 获取设备文件名前缀 */
     com_prefix = g_cmd->prefix;
 
     /* 获取所有待测设备，并按照名称排序 */
@@ -182,6 +187,7 @@ int main(int argc, char **argv)
     {
         if (g_cmd->help_opt == OPTION_CONNECTION)
         {
+            /* 显示连接要求 */
             log_out(LOG_CONSOLE, "\e[1;32mconnections:\e[0m\n");
             display_connection(com_count, comlist);
             return 0;
@@ -189,6 +195,7 @@ int main(int argc, char **argv)
         
         if (g_cmd->help_opt == OPTION_LIST)
         {
+            /* 列出所有待测设备 */
             log_out(LOG_CONSOLE, "\e[1;32mdevice list:\e[0m\n");
             for (i = 0; i < com_count; i++)
             {
@@ -202,6 +209,8 @@ int main(int argc, char **argv)
     time(&log_time);
     localtime_r(&log_time, &time_l);
     strftime(log_name, 128, "%Y.%m.%d-%H:%M:%S.log", &time_l);
+
+    /* 如果没有设置新日志文件的名称，则填入默认 */
     if (g_cmd->new_log_name == NULL)
     {
         g_cmd->new_log_name = malloc(sizeof(char)* 128);
@@ -225,6 +234,7 @@ int main(int argc, char **argv)
         g_cmd->exclude_dev == true) 
         com_count = exclude_com(g_cmd->exclude_name, g_cmd->exclude_count, comlist, com_count);
 
+    /* 如果测试选项为对测，且设备数量为奇数 */
     if (g_cmd->test_opt == OPTION_EACHOTHER && (com_count%2 == 1))
     {
         odd_count_flag = 1;
@@ -255,6 +265,7 @@ int main(int argc, char **argv)
     if (log_fd == -1)
     {
         log_out(LOG_CONSOLE, "create log file %s error\n", log_name);
+        return -1;
     }
     /* 记录测试细节之前，先记录测试基本信息 */
     base_info_store(argc, argv,(odd_count_flag? com_count+1:com_count), comlist, time_l);
@@ -606,57 +617,63 @@ static void heavy_work(void)
 #endif //! IS_DEBUG==1
 
 /*** 
- * @brief 判断参数合法性，根据结果填充全局变量cmd结构体，并返回其中的main_option成员
+ * @brief 判断参数合法性，根据结果填充全局变量cmd结构体，并返回检查结果
  * @param argc [int]        参数个数
  * @param argv [char**]     参数数组
- * @return [unsigned char]  cmd的main_option成员
+ * @return [bool]  是否通过检查
  */
 static bool check_args(int argc, char **argv)
 {
     int opt;
     int i;
     int err_opt;
-    unsigned char *argv_index;
-    char ** temp_argv;
+    unsigned char *argv_index;  /* 记录参数遍历情况，用于确定不定位置的prefix的参数 */
+    char ** temp_argv;          /* 复制argv，用于当前函数处理 */
 
+    /* 复制argv，在进行多次getopt()操作后，无关的参数会被到argv的最后，影响argc_index工作查找prefix */
     temp_argv = malloc(sizeof(char*) * argc);
     memcpy(temp_argv, argv, argc*(sizeof(char*)));
     argv_index = malloc(sizeof(unsigned char) * argc);
     memset(argv_index, (unsigned char)0, argc);
     argv_index[0] = 1;
 
+    /* 循环解析option */
     while ((opt = getopt(argc, temp_argv, short_opts)) != -1) 
     {
+        /* 如果optarg不为空，则optind为optarg索引+1 */
         if (optarg != NULL)
             argv_index[optind-2] = 1;
         argv_index[optind-1] = 1;
 
         switch (opt) 
         {
-            case 'l':
-            case 'c':
+            case OPTION_LIST:
+            case OPTION_CONNECTION:
+                /* 避免重复同性质选项 */
                 if (g_cmd->help_opt != 0 || g_cmd->test_opt != 0)
                     goto args_error;
                 else
                     g_cmd->help_opt = opt;
                 break;
-            case 's':
-            case 'e':
+            case OPTION_SELFTEST:
+            case OPTION_EACHOTHER:
                 if (g_cmd->test_opt != 0 || g_cmd->test_opt != 0)
                     goto args_error;
                 else
                     g_cmd->test_opt = opt;
                 break;
-            case 'd':
+            case OPTION_DEBUGCOM:
                 if (g_cmd->test_opt != 0 || g_cmd->test_opt != 0)
                     goto args_error;
                 else
                 {
+                    /* 如果第一个参数以 - 开头，则说明可能遗漏了参数 */
                     g_cmd->test_opt = opt;
                     if (optarg[0] == '-')
                         goto args_error;
 
                     g_cmd->test_argc = 1;
+                    /* 判断是否有第二个参数 */
                     if (i < argc && (temp_argv[optind])[0] != '-')
                         g_cmd->test_argc = 2;
 
@@ -672,7 +689,7 @@ static bool check_args(int argc, char **argv)
                     }
                 }
                 break;
-            case 'E':
+            case OPTION_EXCLUDE:
                 g_cmd->exclude_dev = true;
                 if (optarg[0] == '-')
                     goto args_error;
@@ -680,6 +697,7 @@ static bool check_args(int argc, char **argv)
                 g_cmd->exclude_count = 1;
                 i = optind;
 
+                /* 如果后续还有参数，则循环添加 */
                 while ( i<argc && (temp_argv[i])[0] != '-') 
                 {
                     g_cmd->exclude_count++;
@@ -696,7 +714,7 @@ static bool check_args(int argc, char **argv)
                     argv_index[i+optind] = 1;
                 }
                 break;
-            case 'N':
+            case OPTION_NEWLOG:
                 g_cmd->new_log = true;
                 if (optarg != NULL)
                 {
@@ -704,10 +722,10 @@ static bool check_args(int argc, char **argv)
                     strcpy(g_cmd->new_log_name, optarg);
                 }
                 break;
-            case 'B':
+            case OPTION_SET_BAUD:
                 g_cmd->baud_rate = atoi(optarg);
                 break;
-            case 'C':
+            case OPTION_SET_TIMES:
                 g_cmd->times = atoi(optarg);
                 if (g_cmd->times == 0)
                     goto args_error;
@@ -719,9 +737,11 @@ args_error:
                 goto return_err;
         }
     }
+    /* 如果既没有指定help_opt, 也没有指定test_opt, 则默认为 OPTION_SELFTEST */
     if (g_cmd->help_opt == 0 && g_cmd->test_opt == 0)
-        g_cmd->test_opt = 's';
+        g_cmd->test_opt = OPTION_SELFTEST;
 
+    /* 根据argv_index的标记，查找prefix */
     for (i = 0; i < argc; i++)
     {
         if (argv_index[i] == 0)
@@ -756,11 +776,14 @@ return_err:
             "\t\t-h: print this manual\n"
             "\t\t-l: -l <com-prefix> -- list device\n"
             "\t\t-c: -c <com-prefix> -- display connections\n"
-            "\t\t-e: -e <com-prefix> [-E [device1] ... ] [-N[log name]] -- one "
+            "\t\t-e: -e <com-prefix> [-E [device1] ... ] [-N[log name]] [-B "
+            "[baud rate]] [-C [send count]]-- one "
             "transmit one receive [exclude device1 ...]\n"
-            "\t\t-s: -s <com-prefix> [-E [device1] ... ] [-N[log name]] -- "
+            "\t\t-s: -s <com-prefix> [-E [device1] ... ] [-N[log name]] [-B "
+            "[baud rate]] [-C [send count]]-- "
             "self transmit and receive [exclude device1 ...]\n"
-            "\t\t-d: -d <com-prefix> <com1> [com2] -- debug com1 and [com2]\n"
+            "\t\t-d: -d <com-prefix> <com1> [com2] [-B [baud rate]] [-C [send count]] "
+            "-- debug com1 and [com2]\n"
             "\tcom-prefix: \n"
             "\t\tcom device name prefix\n",
             argv[0]);
@@ -1294,6 +1317,10 @@ static int get_latest_log(char *log_name)
     }
 }
 
+/*** 
+ * @brief 初始化cmd_t, 并返回指针
+ * @return [void*] 指向一个cmd_t结构体
+ */
 static void* init_cmd(void)
 {
     cmd_t *cmd = malloc(sizeof(cmd_t));
