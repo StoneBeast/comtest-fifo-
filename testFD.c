@@ -2,7 +2,7 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-20 10:28:03
+ * @LastEditTime : 2024-12-20 10:33:00
  * @Description  : linux环境下串口自动测试程序
  */
 
@@ -67,7 +67,6 @@
 #else // TEST_SELF==1
 #define DEV_DIR "./dev_l"
 #endif //! TEST_SELF==1
-static void heavy_work(void);
 
 #else //! IS_DEBUG==1
 
@@ -603,19 +602,6 @@ static void *thread_task(void *arg)
     }
     return 0;
 }
-
-#if IS_DEBUG == 1
-static void heavy_work(void)
-{
-    long i = 0;
-    while (i<1000000000)
-    {
-        i++;
-    }
-
-    return;
-}
-#endif //! IS_DEBUG==1
 
 /*** 
  * @brief 判断参数合法性，根据结果填充全局变量cmd结构体，并返回检查结果
