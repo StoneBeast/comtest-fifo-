@@ -2,7 +2,7 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-20 11:15:25
+ * @LastEditTime : 2024-12-26 10:58:28
  * @Description  : linux环境下串口自动测试程序
  */
 
@@ -11,6 +11,7 @@
 // TODO: 可以将出现错误的打印恢复出来
 // TODO: 修改log文件存储逻辑
 // TODO: 实装波特率自定义、加大测试数据量、测试发送次数
+// FIXME:在预读取阶段，写入数据后有时无法读出，导致后续测试堵塞
 
 #define _GNU_SOURCE
 
@@ -35,7 +36,7 @@
 #define TEST_SELF   1   /* 自测功能测试标志 */
 #define DEBUG_INFO  0   /* debug输出标志 */
 
-#define BUF_LEN     126-33+1    /* buffer长度 */
+#define BUF_LEN     (126-33+1)*5    /* buffer长度 */
 #define READ_FD     0           /* pipe read/write fd */
 #define WRITE_FD    1
 #define END_SIG     "END"       /* 测试结束标志 */
@@ -140,6 +141,7 @@ int main(int argc, char **argv)
     int pipe_fd[2];                     /* 用于与子线程通信的pipe的fd */
     char test_buf[BUF_LEN] = {0};       /* 存放测试数据 */
     char write_buf[BUF_LEN] = {0};      /* 用于接收子进程回报的数据 */
+    char temp_ch;
     int i;                              /* 分别存放在主线程中与主线程、子线程有关的for i */
     int t_i;
     char m_fifo_name[280] = {0};        /* 主线程、子线程打开的设备的名称以及fd */
@@ -271,9 +273,12 @@ int main(int argc, char **argv)
     test_failed_list = malloc(sizeof(char*)*com_count);
 
     /* 填充测试数据，覆盖所有可视字符 */
+    temp_ch = 33;
     for (i = 0; i < BUF_LEN; i++) 
     {
-        test_buf[i] = i+33;
+        test_buf[i] = temp_ch++;
+        if(temp_ch > 126)
+            temp_ch = 33;
     }
 
     /* 初始化两线程信息传输pipe以及同步信号量 */
