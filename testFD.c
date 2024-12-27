@@ -2,12 +2,11 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-26 11:18:44
+ * @LastEditTime : 2024-12-27 10:44:57
  * @Description  : linux环境下串口自动测试程序
  */
 
 // TODO: 从程序健壮性的角度考虑，线程创建失败以及线程结束失败的情况
-// TODO: 可以考虑添加进度条(花掉)，使用转圈的方式，显示程序正在运行即可
 // TODO: 可以将出现错误的打印恢复出来
 // TODO: 修改log文件存储逻辑
 // TODO: 实装设置测试发送次数
@@ -94,10 +93,12 @@ static int exclude_com(char **com_args,  int com_arg_count, struct dirent **coml
 static void free_cmd(void * cmd);
 static int get_latest_log(char *log_name);
 static void* init_cmd(void);
+static void *ani_thread_task(void *device_count);
 
 static sem_t sem_mw_tr, sem_mr_tw, sem_rt;  /* 主线程与子线程之间用于线程同步，子线程与读取线程之间用于轮询读取 */
 static char* com_prefix;                    /* 设备前缀 */
 static int log_fd;                          /* log文件fd */
+static int tested_count = 0;                /* 已经测试的设备数量 */
 extern char *optarg;                        /* getopt()相关参数 */
 extern int optind, opterr, optopt;
 
@@ -152,6 +153,7 @@ int main(int argc, char **argv)
     char t_fifo_name[280] = {0};
     int t_fifo_fd;
     pthread_t thread;                   /* 子线程的句柄 */
+    pthread_t ani_thread;               /* 动画线程句柄 */
     unsigned char arg_ret;              /* 接收check_args()返回的结果 */
     struct dirent **comlist;            /* 存放所有符合条件的设备文件实例 */
     int com_count;                      /* comlist的长度 */
@@ -299,6 +301,10 @@ int main(int argc, char **argv)
     if (com_count == 0)
         log_out(LOG_CONSOLE, "no device: %sx\n", com_prefix);
 
+    /* 创建动画线程 */
+    pthread_create(&ani_thread, NULL, ani_thread_task, &com_count);
+    tested_count = 0;
+
     /* 循环获取目录下的所有文件对象 */
     for (i=0; i<com_count; i++)
     {
@@ -428,6 +434,11 @@ int main(int argc, char **argv)
             log_out(LOG_FILE, "\e[1;32m Test Pass \e[0m\n");
             log_out(LOG_FILE, "===========================================\n");
         }
+
+        tested_count++;
+        /* 测试全部完成之后需要等待动画线程结束，否则会导致输出乱序 */
+        if (tested_count == com_count)
+            pthread_join(ani_thread, NULL);
 
         /* 关闭当前设备 */
         close(m_fifo_fd);
@@ -1333,4 +1344,34 @@ static void* init_cmd(void)
     cmd->times = 1;
 
     return cmd;
+}
+
+static void *ani_thread_task(void *device_count)
+{
+    char *str = "|/-\\";                /* 测试动画元素 */
+    int index = 0;                      /* 当前测试动画显示的元素的索引 */
+    int total = *((int *)device_count); /* 待测设备数量 */
+
+    /* 隐藏光标 */
+    log_out(LOG_CONSOLE, "\e[?25l");
+
+    /* 显示动画 */
+    while (tested_count <= total)
+    {
+        log_out(LOG_CONSOLE,"\e[K\rTesting... %c [%d/%d]", str[index % 4], tested_count, total);
+        fflush(stdout);
+        index++;
+
+        /* 测试完成后退出 */
+        if (tested_count == total)
+            break;
+
+        usleep(1000 * 1);
+    }
+
+    /* 清楚进度动画并重新显示光标 */
+    log_out(LOG_CONSOLE, "\r\e[K");
+    log_out(LOG_CONSOLE, "\e[?25h");
+
+    return NULL;
 }
