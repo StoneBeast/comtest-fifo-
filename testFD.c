@@ -2,7 +2,7 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-27 10:44:57
+ * @LastEditTime : 2024-12-27 13:28:49
  * @Description  : linux环境下串口自动测试程序
  */
 
@@ -1346,6 +1346,11 @@ static void* init_cmd(void)
     return cmd;
 }
 
+/*** 
+ * @brief 过度动画线程任务函数，负责在测试时显示动画
+ * @param device_count [void*]  待测设备数量
+ * @return [void*]  无
+ */
 static void *ani_thread_task(void *device_count)
 {
     char *str = "|/-\\";                /* 测试动画元素 */
