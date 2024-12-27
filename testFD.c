@@ -2,7 +2,7 @@
  * @Author       : stoneBeast
  * @Date         : 2024-11-25 15:53:29
  * @Encoding     : UTF-8
- * @LastEditTime : 2024-12-27 13:28:49
+ * @LastEditTime : 2024-12-27 13:58:01
  * @Description  : linux环境下串口自动测试程序
  */
 
@@ -12,7 +12,6 @@
 // TODO: 实装设置测试发送次数
 // TODO: 添加更加详细的调试功能，例如添加发送特定数据，以方便测试波特率
 // FIXME:在预读取阶段，写入数据后有时无法读出，导致后续测试堵塞(在生产环境没有暂时没有发现)
-// BUG:  在修改到较低的波特率时，由于超时时间设置的较短，导致数据接收不全，造成结果误报
 // BUG:  在修改宏定义 BUF_LEN 时，尝试修改为当前的10倍，会直接出现段错误
 
 #define _GNU_SOURCE
@@ -50,6 +49,7 @@
 #define COM_NUM(name)           (name[strlen(DEV_DIR)] == '/' ? name + strlen(DEV_DIR) + strlen(com_prefix) + 1     \
                                 : name + strlen(com_prefix))            /* 获取传入设备名称设备编号开始的字符地址 */
 #define OUT_NAME(name)          "COM",COM_NUM(name)                     /* 配合字符串模板输出 %s%s 输出COMx形式的设备名称 */
+#define WAIT_TIME               ((BUF_LEN*10000/g_cmd->baud_rate)+20)   /* 等待时间 */
 
 #if !IS_DEBUG //! IS_DEBUG==1
 #define MODE_RS232 0x00
@@ -549,7 +549,7 @@ static void *thread_task(void *arg)
 #endif //! IS_DEBUG==1
 
             pthread_create(&r_thread, NULL, read_task, &t_fifo_fd);
-            read_flag = try_get_result(100);
+            read_flag = try_get_result(WAIT_TIME);
             if (0 == read_flag)
             {
                 pthread_cancel(r_thread);
@@ -1106,7 +1106,7 @@ static void *read_task(void *arg)
     if(read_len < BUF_LEN-1) /* 由于读取速度相较于收发速度快很多，有可能会出现刚接收一部分就返回，导致数据不完整的可能 */
     {
         /* 休眠50ms，保证数据完全接收后，再次读取 */
-        usleep(50*1000);
+        usleep(WAIT_TIME*1000);
         read(r_fd, temp_buf+read_len, BUF_LEN-read_len);
     }
     /* 给task thread发信号 */
